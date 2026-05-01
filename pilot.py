@@ -19,10 +19,6 @@ def load_vault_data():
 
 df_cms = load_vault_data()
 
-if df_cms is not None:
-    st.write(df_cms.columns.tolist())
-    st.write(df_cms.head())
-
 # --- 3. SESSION STATE ---
 if 'step' not in st.session_state: st.session_state.step = "pre_test"
 if 'active_topic' not in st.session_state: st.session_state.active_topic = None
