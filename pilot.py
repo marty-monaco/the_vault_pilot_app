@@ -35,7 +35,7 @@ if df_cms is not None:
 
     if nav == "Learning Portal":
         st.markdown("### 🏛️ Select Your Vault Story")
-        cols = st.columns(len(topic_list))
+        cols = st.columns(max(len(topic_list), 2))
         for i, t in enumerate(topic_list):
             if cols[i].button(f"📖 {t}", use_container_width=True):
                 st.session_state.active_topic = t
