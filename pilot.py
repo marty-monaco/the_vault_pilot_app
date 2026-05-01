@@ -13,7 +13,9 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 
 @st.cache_data(ttl=60)
 def load_vault_data():
-    return conn.read(worksheet="cms")
+    # Direct CSV read to bypass the connection manager for a second
+    url = "https://docs.google.com/spreadsheets/d/1MsDmw8Rc3ikacwll3o8JMo2w4qI0GFeYrsoXAIAXlDg/export?format=csv&gid=0"
+    return pd.read_csv(url)
 
 df_cms = load_vault_data()
 
