@@ -19,7 +19,7 @@ st.set_page_config(page_title="The Vault Pilot", page_icon="⚡", layout="wide")
                     st.secrets["raw_logs"] += log_line
                 except Exception:
                     pass # Quietly fail-safe if secrets aren't writable in this runtime
-                
+
                 st.balloons()
                 st.success("Mastery logged locally and backed up!")
 
