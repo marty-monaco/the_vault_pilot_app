@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import os
+import random  # <--- NEW IMPORT FOR RANDOMIZATION
 from datetime import datetime
 import pytz
 
@@ -8,7 +9,8 @@ import pytz
 st.set_page_config(page_title="The Vault Pilot", page_icon="⚡", layout="wide")
 
 # --- FILE PATH FOR LOCAL STORAGE ---
-DATA_FILE = "vault_mastery_logs.csv"
+# Updated with absolute path to ensure background exporter visibility
+DATA_FILE = os.path.join(os.getcwd(), "vault_mastery_logs.csv")
 
 # Custom UI Styling
 st.markdown("""
@@ -26,7 +28,6 @@ st.markdown("""
 # --- 2. DATA LOADING (CMS) ---
 @st.cache_data(ttl=60)
 def load_vault_data():
-    # Public CSV Export of your CMS tab
     url = "https://docs.google.com/spreadsheets/d/1sxxEyxjvicryUGJRMcd05Hcy6rIFLuXiTZPR_Mco7n8/export?format=csv&gid=0"
     return pd.read_csv(url)
 
@@ -43,6 +44,8 @@ defaults = {
     "class_code": "",
     "student_id": "",
     "ny_tz": pytz.timezone("US/Eastern"),
+    "shuffled_pre": None,     # <--- Stores shuffled pre-test structures
+    "shuffled_post": None     # <--- Stores shuffled pulse check structures
 }
 for k, v in defaults.items():
     st.session_state.setdefault(k, v)
@@ -71,7 +74,6 @@ if nav == "Pilot Summary (Admin)":
                 c4.metric("Avg NPS", f"{df_logs['NPS'].mean():.1f}")
                 st.dataframe(df_logs.sort_values("Timestamp", ascending=False), use_container_width=True)
                 
-                # DOWNLOAD BUTTON
                 st.download_button(
                     label="📥 Download Pilot CSV",
                     data=df_logs.to_csv(index=False),
@@ -101,7 +103,9 @@ elif nav == "Learning Portal":
             if grid_cols[j].button(f"📖 {t}", use_container_width=True):
                 st.session_state.update({
                     "active_topic": t, "step": "pre_test", "nps_score": None,
-                    "ans_pre1": None, "ans_pre2": None
+                    "ans_pre1": None, "ans_pre2": None,
+                    "shuffled_pre": None,   # Reset shuffle settings for new topic
+                    "shuffled_post": None
                 })
                 st.rerun()
 
@@ -113,11 +117,54 @@ elif nav == "Learning Portal":
 
     row = df_cms[df_cms["Topic"] == st.session_state.active_topic].iloc[0]
 
-    # --- STEP 1: PRE-TEST ---
+    # -----------------------------------------------------------------------
+    # RANDOMIZATION ENGINE (Runs once when topic changes)
+    # -----------------------------------------------------------------------
+    if st.session_state.shuffled_pre is None:
+        # 1. Structure the choices
+        pre_opts_q1 = [row["Pre_Opt1"], row["Pre_Opt2"], row["Pre_Opt3"]]
+        pre_opts_q2 = [row["Pre_Opt1_Q2"], row["Pre_Opt2_Q2"], row["Pre_Opt3_Q2"]]
+        
+        # 2. Shuffle choices independently
+        random.shuffle(pre_opts_q1)
+        random.shuffle(pre_opts_q2)
+        
+        # 3. Pair questions with their shuffled choices
+        q_pool = [
+            {"id": "q1", "text": row["Pre_Q1"], "options": pre_opts_q1},
+            {"id": "q2", "text": row["Pre_Q2"], "options": pre_opts_q2}
+        ]
+        # 4. Shuffle the order of the actual questions
+        random.shuffle(q_pool)
+        st.session_state.shuffled_pre = q_pool
+
+    if st.session_state.shuffled_post is None:
+        post_opts_q1 = [row["Post_Opt1"], row["Post_Opt2"], row["Post_Opt3"]]
+        post_opts_q2 = [row["Post_Opt1_Q2"], row["Post_Opt2_Q2"], row["Post_Opt3_Q2"]]
+        
+        random.shuffle(post_opts_q1)
+        random.shuffle(post_opts_q2)
+        
+        qp_pool = [
+            {"id": "q1", "text": row["Post_Q1"], "options": post_opts_q1},
+            {"id": "q2", "text": row["Post_Q2"], "options": post_opts_q2}
+        ]
+        random.shuffle(qp_pool)
+        st.session_state.shuffled_post = qp_pool
+
+    # --- STEP 1: PRE-TEST (RANDOMIZED ORDER) ---
     if st.session_state.step == "pre_test":
         st.title(f"🔍 Pre-Assessment: {st.session_state.active_topic}")
-        p1 = st.radio(row["Pre_Q1"], [row["Pre_Opt1"], row["Pre_Opt2"], row["Pre_Opt3"]], index=None, key="p1")
-        p2 = st.radio(row["Pre_Q2"], [row["Pre_Opt1_Q2"], row["Pre_Opt2_Q2"], row["Pre_Opt3_Q2"]], index=None, key="p2")
+        
+        # Render questions from the session-locked randomized structure
+        p_ans = {}
+        for idx, q in enumerate(st.session_state.shuffled_pre):
+            p_ans[q["id"]] = st.radio(
+                f"Question {idx+1}: {q['text']}", 
+                q["options"], 
+                index=None, 
+                key=f"p_{q['id']}"
+            )
 
         st.divider()
         c1, c2 = st.columns(2)
@@ -125,18 +172,18 @@ elif nav == "Learning Portal":
         with c2: student_id = st.text_input("Your Initials")
 
         if st.button("ENTER THE VAULT ⚡", use_container_width=True):
-            if not class_code or not student_id or p1 is None or p2 is None:
+            if not class_code or not student_id or p_ans["q1"] is None or p_ans["q2"] is None:
                 st.warning("Please complete all questions.")
             else:
                 st.session_state.update({
                     "class_code": class_code, "student_id": student_id,
-                    "ans_pre1": p1, "ans_pre2": p2,
+                    "ans_pre1": p_ans["q1"], "ans_pre2": p_ans["q2"],
                     "start_time": datetime.now(st.session_state.ny_tz),
                     "step": "vault_content",
                 })
                 st.rerun()
 
-    # --- STEP 2: VIDEO + PULSE CHECK ---
+    # --- STEP 2: VIDEO + PULSE CHECK (RANDOMIZED ORDER) ---
     elif st.session_state.step == "vault_content":
         st.title(f"🎬 {st.session_state.active_topic}")
         v_url = str(row.get("Video_URL", "")).strip()
@@ -145,8 +192,15 @@ elif nav == "Learning Portal":
         
         st.divider()
         st.write("### 🧠 Pulse Check")
-        pst1 = st.radio(row["Post_Q1"], [row["Post_Opt1"], row["Post_Opt2"], row["Post_Opt3"]], index=None, key="pst1")
-        pst2 = st.radio(row["Post_Q2"], [row["Post_Opt1_Q2"], row["Post_Opt2_Q2"], row["Post_Opt3_Q2"]], index=None, key="pst2")
+        
+        pst_ans = {}
+        for idx, q in enumerate(st.session_state.shuffled_post):
+            pst_ans[q["id"]] = st.radio(
+                f"Question {idx+1}: {q['text']}", 
+                q["options"], 
+                index=None, 
+                key=f"pst_{q['id']}"
+            )
 
         st.divider()
         st.write("### ⚡ Rate this Vault Story")
@@ -155,27 +209,31 @@ elif nav == "Learning Portal":
         for i, (label, val) in enumerate(ratings.items()):
             if n_cols[i].button(label, use_container_width=True): st.session_state.nps_score = val
 
+        if st.session_state.nps_score:
+            st.success(f"Selected Rating: {st.session_state.nps_score}/10")
+
         if st.button("LOG MASTERY & FINISH 🚀", use_container_width=True):
-            if pst1 is None or pst2 is None or st.session_state.nps_score is None:
+            if pst_ans["q1"] is None or pst_ans["q2"] is None or st.session_state.nps_score is None:
                 st.error("Complete all questions and select a rating.")
             else:
                 now = datetime.now(st.session_state.ny_tz)
                 elapsed = (now - st.session_state.start_time).total_seconds()
                 s_pre = (1 if st.session_state.ans_pre1 == row["Pre_A1"] else 0) + (1 if st.session_state.ans_pre2 == row["Pre_A2"] else 0)
-                s_post = (1 if pst1 == row["Post_A1"] else 0) + (1 if pst2 == row["Post_A2"] else 0)
+                s_post = (1 if pst_ans["q1"] == row["Post_A1"] else 0) + (1 if pst_ans["q2"] == row["Post_A2"] else 0)
+                lift = s_post - s_pre
                 
                 res = pd.DataFrame([{
                     "Timestamp": now.strftime("%Y-%m-%d %H:%M:%S"),
                     "Class": st.session_state.class_code,
                     "Student": st.session_state.student_id,
                     "Topic": st.session_state.active_topic,
-                    "Pre_Score": s_pre, "Post_Score": s_post, "Lift": s_post - s_pre,
+                    "Pre_Score": s_pre, "Post_Score": s_post, "Lift": lift,
                     "NPS": st.session_state.nps_score, "Duration": int(elapsed),
                     "Status": "Completed" if elapsed >= (float(row.get("Video_Length_Sec", 85)) * 0.9) else "Skimmed"
                 }])
 
-                # --- LOCAL CSV WRITING ---
+                # Append log entry using absolute path configuration
                 res.to_csv(DATA_FILE, mode='a', header=not os.path.exists(DATA_FILE), index=False)
                 
                 st.balloons()
-                st.success("Mastery logged locally! You can download results in the Admin panel.")
+                st.success("Mastery logged locally! Download your data from the Admin panel.")
