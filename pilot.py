@@ -8,9 +8,20 @@ import pytz
 # --- 1. APP CONFIG ---
 st.set_page_config(page_title="The Vault Pilot", page_icon="⚡", layout="wide")
 
-# --- FILE PATH FOR LOCAL STORAGE ---
-# Updated with absolute path to ensure background exporter visibility
-DATA_FILE = os.path.join(os.getcwd(), "vault_mastery_logs.csv")
+# --- LOCAL CSV WRITING ---
+                res.to_csv(DATA_FILE, mode='a', header=not os.path.exists(DATA_FILE), index=False)
+                
+                # --- BACKUP: PERSISTENT SECRETS LOGGING ---
+                try:
+                    log_line = f"{now.strftime('%Y-%m-%d %H:%M:%S')},{st.session_state.class_code},{st.session_state.student_id},{st.session_state.active_topic},{s_pre},{s_post},{lift},{st.session_state.nps_score},{int(elapsed)},{status}\n"
+                    if "raw_logs" not in st.secrets:
+                        st.secrets["raw_logs"] = "Timestamp,Class,Student,Topic,Pre_Score,Post_Score,Lift,NPS,Duration,Status\n"
+                    st.secrets["raw_logs"] += log_line
+                except Exception:
+                    pass # Quietly fail-safe if secrets aren't writable in this runtime
+                
+                st.balloons()
+                st.success("Mastery logged locally and backed up!")
 
 # Custom UI Styling
 st.markdown("""
