@@ -1,27 +1,15 @@
 import streamlit as st
 import pandas as pd
 import os
-import random  # <--- NEW IMPORT FOR RANDOMIZATION
+import random
 from datetime import datetime
 import pytz
 
 # --- 1. APP CONFIG ---
 st.set_page_config(page_title="The Vault Pilot", page_icon="⚡", layout="wide")
 
-# --- LOCAL CSV WRITING ---
-res.to_csv(DATA_FILE, mode='a', header=not os.path.exists(DATA_FILE), index=False)
-                
-# --- BACKUP: PERSISTENT SECRETS LOGGING ---
-try:
-    log_line = f"{now.strftime('%Y-%m-%d %H:%M:%S')},{st.session_state.class_code},{st.session_state.student_id},{st.session_state.active_topic},{s_pre},{s_post},{lift},{st.session_state.nps_score},{int(elapsed)},{status}\n"
-    if "raw_logs" not in st.secrets:
-        st.secrets["raw_logs"] = "Timestamp,Class,Student,Topic,Pre_Score,Post_Score,Lift,NPS,Duration,Status\n"
-    st.secrets["raw_logs"] += log_line
-except Exception:
-    pass # Quietly fail-safe if secrets aren't writable in this runtime
-
-st.balloons()
-st.success("Mastery logged locally and backed up!")
+# --- FILE PATH FOR LOCAL STORAGE ---
+DATA_FILE = os.path.join(os.getcwd(), "vault_mastery_logs.csv")
 
 # Custom UI Styling
 st.markdown("""
@@ -55,8 +43,8 @@ defaults = {
     "class_code": "",
     "student_id": "",
     "ny_tz": pytz.timezone("US/Eastern"),
-    "shuffled_pre": None,     # <--- Stores shuffled pre-test structures
-    "shuffled_post": None     # <--- Stores shuffled pulse check structures
+    "shuffled_pre": None,
+    "shuffled_post": None
 }
 for k, v in defaults.items():
     st.session_state.setdefault(k, v)
@@ -115,7 +103,7 @@ elif nav == "Learning Portal":
                 st.session_state.update({
                     "active_topic": t, "step": "pre_test", "nps_score": None,
                     "ans_pre1": None, "ans_pre2": None,
-                    "shuffled_pre": None,   # Reset shuffle settings for new topic
+                    "shuffled_pre": None,
                     "shuffled_post": None
                 })
                 st.rerun()
@@ -128,24 +116,18 @@ elif nav == "Learning Portal":
 
     row = df_cms[df_cms["Topic"] == st.session_state.active_topic].iloc[0]
 
-    # -----------------------------------------------------------------------
-    # RANDOMIZATION ENGINE (Runs once when topic changes)
-    # -----------------------------------------------------------------------
+    # --- RANDOMIZATION ENGINE ---
     if st.session_state.shuffled_pre is None:
-        # 1. Structure the choices
         pre_opts_q1 = [row["Pre_Opt1"], row["Pre_Opt2"], row["Pre_Opt3"]]
         pre_opts_q2 = [row["Pre_Opt1_Q2"], row["Pre_Opt2_Q2"], row["Pre_Opt3_Q2"]]
         
-        # 2. Shuffle choices independently
         random.shuffle(pre_opts_q1)
         random.shuffle(pre_opts_q2)
         
-        # 3. Pair questions with their shuffled choices
         q_pool = [
             {"id": "q1", "text": row["Pre_Q1"], "options": pre_opts_q1},
             {"id": "q2", "text": row["Pre_Q2"], "options": pre_opts_q2}
         ]
-        # 4. Shuffle the order of the actual questions
         random.shuffle(q_pool)
         st.session_state.shuffled_pre = q_pool
 
@@ -163,11 +145,10 @@ elif nav == "Learning Portal":
         random.shuffle(qp_pool)
         st.session_state.shuffled_post = qp_pool
 
-    # --- STEP 1: PRE-TEST (RANDOMIZED ORDER) ---
+    # --- STEP 1: PRE-TEST ---
     if st.session_state.step == "pre_test":
         st.title(f"🔍 Pre-Assessment: {st.session_state.active_topic}")
         
-        # Render questions from the session-locked randomized structure
         p_ans = {}
         for idx, q in enumerate(st.session_state.shuffled_pre):
             p_ans[q["id"]] = st.radio(
@@ -194,7 +175,7 @@ elif nav == "Learning Portal":
                 })
                 st.rerun()
 
-    # --- STEP 2: VIDEO + PULSE CHECK (RANDOMIZED ORDER) ---
+    # --- STEP 2: VIDEO + PULSE CHECK ---
     elif st.session_state.step == "vault_content":
         st.title(f"🎬 {st.session_state.active_topic}")
         v_url = str(row.get("Video_URL", "")).strip()
@@ -232,6 +213,7 @@ elif nav == "Learning Portal":
                 s_pre = (1 if st.session_state.ans_pre1 == row["Pre_A1"] else 0) + (1 if st.session_state.ans_pre2 == row["Pre_A2"] else 0)
                 s_post = (1 if pst_ans["q1"] == row["Post_A1"] else 0) + (1 if pst_ans["q2"] == row["Post_A2"] else 0)
                 lift = s_post - s_pre
+                status = "Completed" if elapsed >= (float(row.get("Video_Length_Sec", 85)) * 0.9) else "Skimmed"
                 
                 res = pd.DataFrame([{
                     "Timestamp": now.strftime("%Y-%m-%d %H:%M:%S"),
@@ -240,11 +222,20 @@ elif nav == "Learning Portal":
                     "Topic": st.session_state.active_topic,
                     "Pre_Score": s_pre, "Post_Score": s_post, "Lift": lift,
                     "NPS": st.session_state.nps_score, "Duration": int(elapsed),
-                    "Status": "Completed" if elapsed >= (float(row.get("Video_Length_Sec", 85)) * 0.9) else "Skimmed"
+                    "Status": status
                 }])
 
-                # Append log entry using absolute path configuration
+                # --- LOCAL CSV WRITING ---
                 res.to_csv(DATA_FILE, mode='a', header=not os.path.exists(DATA_FILE), index=False)
                 
+                # --- BACKUP: PERSISTENT SECRETS LOGGING ---
+                try:
+                    log_line = f"{now.strftime('%Y-%m-%d %H:%M:%S')},{st.session_state.class_code},{st.session_state.student_id},{st.session_state.active_topic},{s_pre},{s_post},{lift},{st.session_state.nps_score},{int(elapsed)},{status}\n"
+                    if "raw_logs" not in st.secrets:
+                        st.secrets["raw_logs"] = "Timestamp,Class,Student,Topic,Pre_Score,Post_Score,Lift,NPS,Duration,Status\n"
+                    st.secrets["raw_logs"] += log_line
+                except Exception:
+                    pass
+                
                 st.balloons()
-                st.success("Mastery logged locally! Download your data from the Admin panel.")
+                st.success("Mastery logged locally and backed up!")
