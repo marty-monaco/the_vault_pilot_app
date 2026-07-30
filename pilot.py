@@ -175,12 +175,26 @@ elif nav == "Learning Portal":
                 })
                 st.rerun()
 
-    # --- STEP 2: VIDEO + PULSE CHECK ---
+   # --- STEP 2: VIDEO + PULSE CHECK ---
     elif st.session_state.step == "vault_content":
         st.title(f"🎬 {st.session_state.active_topic}")
-        v_url = str(row.get("Video_URL", "")).strip()
-        if v_url.startswith("http"):
-            st.video(v_url)
+        
+        raw_url = str(row.get("Video_URL", "")).strip()
+        
+        # Extract YouTube Video ID (handles watch, shorts, share links, and embeds)
+        import re
+        pattern = r'(?:v=|\/([0-9A-Za-z_-]{11})|youtu\.be\/|\/shorts\/|\/embed\/)([0-9A-Za-z_-]{11})'
+        match = re.search(pattern, raw_url)
+        
+        if match:
+            video_id = match.group(1) or match.group(2)
+            clean_url = f"https://www.youtube.com/watch?v={video_id}"
+            st.video(clean_url)
+        elif raw_url.startswith("http"):
+            # Fallback for non-YouTube video links (e.g., MP4s or Vimeo)
+            st.video(raw_url)
+        else:
+            st.warning("⚠️ Video URL missing or invalid for this topic.")
         
         st.divider()
         st.write("### 🧠 Pulse Check")
