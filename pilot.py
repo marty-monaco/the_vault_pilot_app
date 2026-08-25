@@ -2,8 +2,11 @@
 the_vault_pilot_app/pilot.py
 
 Student-facing delivery layer for The Vault.
-Reads curriculum content from Google Sheets CMS, runs pre/post assessments,
-embeds normalized video, collects NPS, and logs mastery data to Supabase.
+Reads curriculum content from a public Google Sheet (CMS), presents
+pre/post assessments with randomised option ordering, embeds the video,
+collects NPS ratings, and logs mastery data to:
+  - Local CSV (primary, fast)
+  - Supabase (persistent backup, survives Streamlit restarts)
 """
 import os
 import re
@@ -13,18 +16,24 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 import pytz
-from supabase import create_client, Client
+
+try:
+    from supabase import create_client, Client as SupabaseClient
+    SUPABASE_AVAILABLE = True
+except ImportError:
+    SUPABASE_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# CONSTANTS & CONFIG
+# CONSTANTS
 # ---------------------------------------------------------------------------
 CMS_CSV_URL = (
     "https://docs.google.com/spreadsheets/d/"
     "1sxxEyxjvicryUGJRMcd05Hcy6rIFLuXiTZPR_Mco7n8"
     "/export?format=csv&gid=0"
 )
+DATA_FILE              = os.path.join(os.getcwd(), "vault_mastery_logs.csv")
 ADMIN_PASSWORD         = "vault2026"
 VIDEO_COMPLETE_RATIO   = 0.9     # 90% of video length = "Completed"
 DEFAULT_VIDEO_LEN_SEC  = 85
@@ -38,9 +47,18 @@ NPS_RATINGS = [
     ("🏆 Epic",  10),
 ]
 
+# YouTube URL pattern — handles watch, shorts, share, and embed links
 YT_PATTERN = re.compile(
-    r'(?:v=|\/([0-9A-Za-z_-]{11})|youtu\.be\/|\/shorts\/|\/embed\/)([0-9A-Za-z_-]{11})'
+    r'(?:v=|youtu\.be\/|\/shorts\/|\/embed\/)([0-9A-Za-z_-]{11})'
 )
+
+LOG_COLUMNS = [
+    "Timestamp", "Class", "Student", "Topic",
+    "Pre_Score", "Post_Score", "Lift", "NPS", "Duration", "Status",
+]
+
+# Supabase column names match LOG_COLUMNS lowercased
+SUPABASE_TABLE = "vault_logs"
 
 # ---------------------------------------------------------------------------
 # PAGE CONFIG & STYLES
@@ -78,24 +96,7 @@ for k, v in SESSION_DEFAULTS.items():
     st.session_state.setdefault(k, v)
 
 # ---------------------------------------------------------------------------
-# DATABASE INITIALIZATION
-# ---------------------------------------------------------------------------
-
-@st.cache_resource
-def get_supabase_client() -> Client | None:
-    """Connect to Supabase using Streamlit secrets."""
-    try:
-        url = st.secrets["supabase"]["SUPABASE_URL"]
-        key = st.secrets["supabase"]["SUPABASE_KEY"]
-        return create_client(url, key)
-    except Exception as e:
-        logger.error(f"Failed to initialize Supabase client: {e}")
-        return None
-
-supabase = get_supabase_client()
-
-# ---------------------------------------------------------------------------
-# DATA LOADING & PERSISTENCE
+# DATA LOADING
 # ---------------------------------------------------------------------------
 
 @st.cache_data(ttl=60)
@@ -113,70 +114,115 @@ def load_cms() -> pd.DataFrame | None:
 
 
 def load_logs() -> pd.DataFrame | None:
-    """Fetch mastery logs from Supabase."""
-    if not supabase:
-        st.error("⚠️ Supabase credentials not found in secrets.")
+    """Load the local mastery log CSV if it exists."""
+    if not os.path.exists(DATA_FILE):
         return None
     try:
-        response = supabase.table("pilot_mastery_logs").select("*").order("created_at", desc=True).execute()
-        if response.data:
-            df = pd.DataFrame(response.data)
-            return df.rename(columns={
-                "created_at": "Timestamp",
-                "class_code": "Class",
-                "student_id": "Student",
-                "topic":      "Topic",
-                "pre_score":  "Pre_Score",
-                "post_score": "Post_Score",
-                "lift":       "Lift",
-                "nps":        "NPS",
-                "duration":   "Duration",
-                "status":     "Status",
-            })
-        return None
+        df = pd.read_csv(DATA_FILE)
+        return df if not df.empty else None
     except Exception as e:
-        logger.error(f"Supabase load error: {e}")
+        st.error(f"Failed to read log file: {e}")
         return None
 
 
 def append_log(record: dict) -> None:
-    """Append one result row directly into Supabase."""
-    if not supabase:
-        raise RuntimeError("Supabase client is not connected.")
+    """Append one result row to the local CSV, writing headers if needed."""
+    pd.DataFrame([record]).to_csv(
+        DATA_FILE,
+        mode="a",
+        header=not os.path.exists(DATA_FILE),
+        index=False,
+        columns=LOG_COLUMNS,
+    )
 
-    payload = {
-        "class_code": str(record["Class"]),
-        "student_id": str(record["Student"]),
-        "topic":      str(record["Topic"]),
-        "pre_score":  int(record["Pre_Score"]),
-        "post_score": int(record["Post_Score"]),
-        "lift":       int(record["Lift"]),
-        "nps":        int(record["NPS"]),
-        "duration":   int(record["Duration"]),
-        "status":     str(record["Status"]),
-    }
-    response = supabase.table("pilot_mastery_logs").insert(payload).execute()
-    if not response.data:
-        raise RuntimeError("Failed to insert record into Supabase.")
+
+@st.cache_resource
+def _get_supabase() -> "SupabaseClient | None":
+    """Return a cached Supabase client if credentials are configured.
+
+    Add to Streamlit secrets:
+        SUPABASE_URL = "https://zxxbeamdwaazcyrgntby.supabase.co"
+        SUPABASE_KEY = "your-rotated-anon-key"
+    """
+    if not SUPABASE_AVAILABLE:
+        return None
+    try:
+        url = st.secrets.get("SUPABASE_URL", "")
+        key = st.secrets.get("SUPABASE_KEY", "")
+        if not url or not key:
+            return None
+        return create_client(url, key)
+    except Exception as e:
+        logger.warning("Supabase client init failed: %s", e)
+        return None
+
+
+def append_log_supabase(record: dict) -> bool:
+    """Write one result row to Supabase vault_logs table.
+
+    Returns True on success, False on failure (so caller can warn user).
+    Column names are lowercased to match the SQL schema.
+    """
+    client = _get_supabase()
+    if client is None:
+        return False
+    try:
+        supabase_record = {k.lower(): v for k, v in record.items()}
+        # Supabase expects ISO timestamp string
+        supabase_record["timestamp"] = record["Timestamp"]
+        client.table(SUPABASE_TABLE).insert(supabase_record).execute()
+        logger.info("Supabase write OK for student %s", record.get("Student"))
+        return True
+    except Exception as e:
+        logger.error("Supabase write failed: %s", e)
+        return False
+
+
+def load_logs_supabase() -> pd.DataFrame | None:
+    """Load all vault_logs rows from Supabase for the admin dashboard."""
+    client = _get_supabase()
+    if client is None:
+        return None
+    try:
+        response = client.table(SUPABASE_TABLE).select("*").order(
+            "timestamp", desc=True
+        ).execute()
+        if response.data:
+            df = pd.DataFrame(response.data)
+            # Normalise column names to match CSV format
+            df.columns = [c.title() if c != "id" and c != "created_at"
+                          else c for c in df.columns]
+            return df
+        return None
+    except Exception as e:
+        logger.error("Supabase read failed: %s", e)
+        return None
 
 # ---------------------------------------------------------------------------
 # HELPERS
 # ---------------------------------------------------------------------------
 
 def resolve_video_url(raw_url: str) -> str | None:
-    """Return a clean YouTube watch URL, direct video link, or None."""
-    raw_url = str(raw_url).strip()
+    """Return a clean YouTube watch URL, a direct URL, or None if invalid."""
+    raw_url = raw_url.strip()
     match = YT_PATTERN.search(raw_url)
     if match:
-        video_id = match.group(1) or match.group(2)
-        return f"https://www.youtube.com/watch?v={video_id}"
+        return f"https://www.youtube.com/watch?v={match.group(1)}"
     if raw_url.startswith("http"):
         return raw_url
     return None
 
 
 def build_shuffled_questions(row: pd.Series, stage: str) -> list[dict]:
-    """Build and shuffle question pool for pre or post stage."""
+    """Build and shuffle question pool for pre or post stage.
+
+    Args:
+        row:   CMS row for the active topic.
+        stage: 'pre' or 'post'
+
+    Returns:
+        List of 2 question dicts with shuffled options, order randomised.
+    """
     if stage == "pre":
         pool = [
             {
@@ -216,7 +262,7 @@ def build_shuffled_questions(row: pd.Series, stage: str) -> list[dict]:
 
 
 def score_answers(answers: dict, row: pd.Series, stage: str) -> int:
-    """Calculate correct answers count."""
+    """Return number of correct answers (0, 1, or 2) for pre or post stage."""
     if stage == "pre":
         return (
             (1 if answers.get("q1") == row["Pre_A1"] else 0)
@@ -242,7 +288,7 @@ def render_mastery_badge(initials: str, lift: int) -> None:
 # ---------------------------------------------------------------------------
 
 def render_admin() -> None:
-    st.title("🔐 Admin Dashboard (Supabase Real-Time)")
+    st.title("🔐 Admin Dashboard")
     pw = st.text_input("Access Key", type="password")
 
     if not pw:
@@ -252,10 +298,19 @@ def render_admin() -> None:
         return
 
     st.success("Access granted.")
-    df_logs = load_logs()
 
-    if df_logs is None or df_logs.empty:
-        st.info("No submissions found in Supabase yet.")
+    # Prefer Supabase (persistent) over local CSV (ephemeral)
+    df_supabase = load_logs_supabase()
+    df_local    = load_logs()
+
+    if df_supabase is not None:
+        df_logs = df_supabase
+        st.info("📡 Showing data from Supabase (persistent cloud store).")
+    elif df_local is not None:
+        df_logs = df_local
+        st.warning("⚠️ Supabase unavailable — showing local CSV data only.")
+    else:
+        st.info("No submissions yet. Logs will appear here after the first student completes a story.")
         return
 
     c1, c2, c3, c4 = st.columns(4)
@@ -266,9 +321,9 @@ def render_admin() -> None:
 
     st.dataframe(df_logs.sort_values("Timestamp", ascending=False), use_container_width=True)
     st.download_button(
-        label="📥 Download Supabase Pilot CSV",
+        label="📥 Download Pilot CSV",
         data=df_logs.to_csv(index=False),
-        file_name=f"vault_pilot_supabase_{datetime.now(NY_TZ).strftime('%Y%m%d')}.csv",
+        file_name=f"vault_pilot_{datetime.now(NY_TZ).strftime('%Y%m%d')}.csv",
         mime="text/csv",
     )
 
@@ -279,6 +334,7 @@ def render_admin() -> None:
 def render_pre_test(row: pd.Series) -> None:
     st.title(f"🔍 Pre-Assessment: {st.session_state.active_topic}")
 
+    # Initialise shuffled questions once per topic selection
     if st.session_state.shuffled_pre is None:
         st.session_state.shuffled_pre = build_shuffled_questions(row, "pre")
 
@@ -330,6 +386,7 @@ def render_vault_content(row: pd.Series) -> None:
     st.divider()
     st.write("### 🧠 Pulse Check")
 
+    # Initialise shuffled post questions once
     if st.session_state.shuffled_post is None:
         st.session_state.shuffled_post = build_shuffled_questions(row, "post")
 
@@ -362,7 +419,7 @@ def render_vault_content(row: pd.Series) -> None:
 
 
 def _submit_results(row: pd.Series, pst_ans: dict) -> None:
-    """Score, persist to Supabase, and render results."""
+    """Score, log, and render the mastery result."""
     now     = datetime.now(NY_TZ)
     elapsed = (now - st.session_state.start_time).total_seconds()
 
@@ -375,6 +432,7 @@ def _submit_results(row: pd.Series, pst_ans: dict) -> None:
     status    = "Completed" if elapsed >= video_len * VIDEO_COMPLETE_RATIO else "Skimmed"
 
     record = {
+        "Timestamp":  now.strftime("%Y-%m-%d %H:%M:%S"),
         "Class":      st.session_state.class_code,
         "Student":    st.session_state.student_id,
         "Topic":      st.session_state.active_topic,
@@ -386,18 +444,24 @@ def _submit_results(row: pd.Series, pst_ans: dict) -> None:
         "Status":     status,
     }
 
+    # Primary write — local CSV
     try:
         append_log(record)
     except Exception as e:
-        st.error(f"❌ Failed to persist results to Supabase: {e}")
+        st.error(f"❌ Failed to save results locally: {e}")
         return
+
+    # Backup write — Supabase (best-effort, never blocks the student)
+    sb_ok = append_log_supabase(record)
+    if not sb_ok and _get_supabase() is not None:
+        st.caption("⚠️ Cloud backup write failed — data saved locally.")
 
     if status == "Completed":
         st.balloons()
         render_mastery_badge(st.session_state.student_id, lift)
     else:
         st.warning(
-            f"Mastery logged to cloud! (Lift: {lift:+d}) "
+            f"Mastery logged! (Lift: {lift:+d}) "
             "Try watching the full video next time to earn a badge."
         )
 
@@ -410,6 +474,7 @@ def render_learning_portal(df_cms: pd.DataFrame) -> None:
 
     st.markdown("### 🏛️ Select Your Vault Story")
 
+    # Render topics in a 3-column grid — scales to any number of topics
     n_cols = 3
     for i in range(0, len(topic_list), n_cols):
         grid_cols = st.columns(n_cols)
@@ -453,11 +518,10 @@ def main() -> None:
 
     df_cms = load_cms()
     if df_cms is None:
-        st.error("❌ Could not load CMS content. Check the Google Sheet URL.")
+        st.error("❌ Could not load CMS content. Check the Google Sheet URL and sharing settings.")
         st.stop()
 
     render_learning_portal(df_cms)
 
 
-if __name__ == "__main__":
-    main()
+main()
