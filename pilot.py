@@ -84,8 +84,10 @@ for k, v in SESSION_DEFAULTS.items():
 
 @st.cache_resource
 def get_supabase_client() -> Client | None:
-    """Connect to Supabase using Streamlit secrets."""
+    """Connect to Supabase supporting nested, flat, and environment variable configurations."""
     url, key = None, None
+
+    # 1. Nested [supabase] section in secrets
     try:
         if "supabase" in st.secrets:
             url = st.secrets["supabase"].get("SUPABASE_URL")
@@ -93,19 +95,82 @@ def get_supabase_client() -> Client | None:
     except Exception:
         pass
 
+    # 2. Flat root keys in st.secrets
     if not url:
-        url = st.secrets.get("SUPABASE_URL") or os.environ.get("SUPABASE_URL")
+        try:
+            url = st.secrets.get("SUPABASE_URL")
+        except Exception:
+            pass
     if not key:
-        key = st.secrets.get("SUPABASE_KEY") or os.environ.get("SUPABASE_KEY")
+        try:
+            key = st.secrets.get("SUPABASE_KEY")
+        except Exception:
+            pass
+
+    # 3. Environment variables fallback
+    if not url:
+        url = os.environ.get("SUPABASE_URL")
+    if not key:
+        key = os.environ.get("SUPABASE_KEY")
 
     if not url or not key:
-        logger.warning("Supabase credentials not found in secrets.")
+        logger.error("Supabase URL or Key could not be resolved from secrets or environment.")
         return None
 
     try:
         return create_client(str(url).strip(), str(key).strip())
     except Exception as e:
         logger.error(f"Failed to initialize Supabase client: {e}")
+        return None
+
+
+def append_log(record: dict) -> None:
+    """Append one result row directly into Supabase."""
+    client = get_supabase_client()
+    if not client:
+        raise RuntimeError("Supabase client is not connected. Check your SUPABASE_URL and SUPABASE_KEY secrets.")
+
+    payload = {
+        "class_code": str(record["Class"]),
+        "student_id": str(record["Student"]),
+        "topic":      str(record["Topic"]),
+        "pre_score":  int(record["Pre_Score"]),
+        "post_score": int(record["Post_Score"]),
+        "lift":       int(record["Lift"]),
+        "nps":        int(record["NPS"]),
+        "duration":   int(record["Duration"]),
+        "status":     str(record["Status"]),
+    }
+    response = client.table("pilot_mastery_logs").insert(payload).execute()
+    if not response.data:
+        raise RuntimeError("Supabase accepted request but returned no data.")
+
+
+def load_logs() -> pd.DataFrame | None:
+    """Fetch mastery logs from Supabase."""
+    client = get_supabase_client()
+    if not client:
+        st.error("⚠️ Supabase credentials not found or client failed to connect.")
+        return None
+    try:
+        response = client.table("pilot_mastery_logs").select("*").order("created_at", desc=True).execute()
+        if response.data:
+            df = pd.DataFrame(response.data)
+            return df.rename(columns={
+                "created_at": "Timestamp",
+                "class_code": "Class",
+                "student_id": "Student",
+                "topic":      "Topic",
+                "pre_score":  "Pre_Score",
+                "post_score": "Post_Score",
+                "lift":       "Lift",
+                "nps":        "NPS",
+                "duration":   "Duration",
+                "status":     "Status",
+            })
+        return None
+    except Exception as e:
+        logger.error(f"Supabase load error: {e}")
         return None
 
 
