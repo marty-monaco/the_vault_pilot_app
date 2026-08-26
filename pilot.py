@@ -2,8 +2,8 @@
 the_vault_pilot_app/pilot.py
 
 Student-facing delivery layer for The Vault.
-Reads curriculum content from Google Sheets CMS, runs pre/post assessments,
-embeds normalized video, collects NPS, and logs mastery data to Supabase.
+Reads curriculum content from Supabase (with Google Sheets fallback), runs
+pre/post assessments, embeds normalized video, collects NPS, and logs mastery data to Supabase.
 """
 import os
 import re
@@ -84,13 +84,29 @@ for k, v in SESSION_DEFAULTS.items():
 @st.cache_resource
 def get_supabase_client() -> Client | None:
     """Connect to Supabase using Streamlit secrets."""
+    url, key = None, None
     try:
-        url = st.secrets["supabase"]["SUPABASE_URL"]
-        key = st.secrets["supabase"]["SUPABASE_KEY"]
-        return create_client(url, key)
+        if "supabase" in st.secrets:
+            url = st.secrets["supabase"].get("SUPABASE_URL")
+            key = st.secrets["supabase"].get("SUPABASE_KEY")
+    except Exception:
+        pass
+
+    if not url:
+        url = st.secrets.get("SUPABASE_URL") or os.environ.get("SUPABASE_URL")
+    if not key:
+        key = st.secrets.get("SUPABASE_KEY") or os.environ.get("SUPABASE_KEY")
+
+    if not url or not key:
+        logger.warning("Supabase credentials not found in secrets.")
+        return None
+
+    try:
+        return create_client(str(url).strip(), str(key).strip())
     except Exception as e:
         logger.error(f"Failed to initialize Supabase client: {e}")
         return None
+
 
 supabase = get_supabase_client()
 
@@ -98,19 +114,64 @@ supabase = get_supabase_client()
 # DATA LOADING & PERSISTENCE
 # ---------------------------------------------------------------------------
 
+def _normalize_cms_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Map lowercase DB column names to the PascalCase format used across UI."""
+    col_map = {
+        "topic": "Topic",
+        "video_url": "Video_URL",
+        "video_length_sec": "Video_Length_Sec",
+        "pre_q1": "Pre_Q1",
+        "pre_opt1": "Pre_Opt1",
+        "pre_opt2": "Pre_Opt2",
+        "pre_opt3": "Pre_Opt3",
+        "pre_opt4": "Pre_Opt4",
+        "pre_a1": "Pre_A1",
+        "pre_q2": "Pre_Q2",
+        "pre_opt1_q2": "Pre_Opt1_Q2",
+        "pre_opt2_q2": "Pre_Opt2_Q2",
+        "pre_opt3_q2": "Pre_Opt3_Q2",
+        "pre_opt4_q2": "Pre_Opt4_Q2",
+        "pre_a2": "Pre_A2",
+        "post_q1": "Post_Q1",
+        "post_opt1": "Post_Opt1",
+        "post_opt2": "Post_Opt2",
+        "post_opt3": "Post_Opt3",
+        "post_opt4": "Post_Opt4",
+        "post_a1": "Post_A1",
+        "post_q2": "Post_Q2",
+        "post_opt1_q2": "Post_Opt1_Q2",
+        "post_opt2_q2": "Post_Opt2_Q2",
+        "post_opt3_q2": "Post_Opt3_Q2",
+        "post_opt4_q2": "Post_Opt4_Q2",
+        "post_a2": "Post_A2",
+    }
+    return df.rename(columns=col_map)
+
+
 @st.cache_data(ttl=60)
 def load_cms() -> pd.DataFrame | None:
-    """Load CMS stories directly from the Supabase database."""
-    if not supabase:
-        return None
+    """Load CMS stories from Supabase with Google Sheets fallback."""
+    # 1. Attempt load from Supabase vault_curriculum
+    if supabase:
+        try:
+            response = supabase.table("vault_curriculum").select("*").execute()
+            if response.data and len(response.data) > 0:
+                df = pd.DataFrame(response.data)
+                return _normalize_cms_df(df)
+            else:
+                logger.info("Supabase 'vault_curriculum' empty. Falling back to Google Sheet.")
+        except Exception as e:
+            logger.warning(f"Supabase CMS fetch error: {e}. Falling back to Google Sheet.")
+
+    # 2. Fallback to Google Sheets CSV export
     try:
-        response = supabase.table("vault_curriculum").select("*").execute()
-        if response.data:
-            return pd.DataFrame(response.data)
-        return None
+        df = pd.read_csv(CMS_CSV_URL)
+        if not df.empty:
+            return _normalize_cms_df(df)
     except Exception as e:
-        logger.error(f"Failed to fetch CMS from Supabase: {e}")
-        return None
+        logger.error(f"Google Sheet fetch failed: {e}")
+
+    return None
 
 
 def load_logs() -> pd.DataFrame | None:
@@ -179,38 +240,34 @@ def resolve_video_url(raw_url: str) -> str | None:
 def build_shuffled_questions(row: pd.Series, stage: str) -> list[dict]:
     """Build and shuffle question pool for pre or post stage."""
     if stage == "pre":
+        opts_q1 = [row.get("Pre_Opt1"), row.get("Pre_Opt2"), row.get("Pre_Opt3")]
+        if pd.notna(row.get("Pre_Opt4")):
+            opts_q1.append(row.get("Pre_Opt4"))
+        opts_q1 = [str(o) for o in opts_q1 if pd.notna(o) and str(o).strip()]
+
+        opts_q2 = [row.get("Pre_Opt1_Q2"), row.get("Pre_Opt2_Q2"), row.get("Pre_Opt3_Q2")]
+        if pd.notna(row.get("Pre_Opt4_Q2")):
+            opts_q2.append(row.get("Pre_Opt4_Q2"))
+        opts_q2 = [str(o) for o in opts_q2 if pd.notna(o) and str(o).strip()]
+
         pool = [
-            {
-                "id": "q1",
-                "text": row["Pre_Q1"],
-                "options": random.sample(
-                    [row["Pre_Opt1"], row["Pre_Opt2"], row["Pre_Opt3"]], 3
-                ),
-            },
-            {
-                "id": "q2",
-                "text": row["Pre_Q2"],
-                "options": random.sample(
-                    [row["Pre_Opt1_Q2"], row["Pre_Opt2_Q2"], row["Pre_Opt3_Q2"]], 3
-                ),
-            },
+            {"id": "q1", "text": row["Pre_Q1"], "options": random.sample(opts_q1, len(opts_q1))},
+            {"id": "q2", "text": row["Pre_Q2"], "options": random.sample(opts_q2, len(opts_q2))},
         ]
     else:
+        opts_q1 = [row.get("Post_Opt1"), row.get("Post_Opt2"), row.get("Post_Opt3")]
+        if pd.notna(row.get("Post_Opt4")):
+            opts_q1.append(row.get("Post_Opt4"))
+        opts_q1 = [str(o) for o in opts_q1 if pd.notna(o) and str(o).strip()]
+
+        opts_q2 = [row.get("Post_Opt1_Q2"), row.get("Post_Opt2_Q2"), row.get("Post_Opt3_Q2")]
+        if pd.notna(row.get("Post_Opt4_Q2")):
+            opts_q2.append(row.get("Post_Opt4_Q2"))
+        opts_q2 = [str(o) for o in opts_q2 if pd.notna(o) and str(o).strip()]
+
         pool = [
-            {
-                "id": "q1",
-                "text": row["Post_Q1"],
-                "options": random.sample(
-                    [row["Post_Opt1"], row["Post_Opt2"], row["Post_Opt3"]], 3
-                ),
-            },
-            {
-                "id": "q2",
-                "text": row["Post_Q2"],
-                "options": random.sample(
-                    [row["Post_Opt1_Q2"], row["Post_Opt2_Q2"], row["Post_Opt3_Q2"]], 3
-                ),
-            },
+            {"id": "q1", "text": row["Post_Q1"], "options": random.sample(opts_q1, len(opts_q1))},
+            {"id": "q2", "text": row["Post_Q2"], "options": random.sample(opts_q2, len(opts_q2))},
         ]
     random.shuffle(pool)
     return pool
@@ -220,12 +277,12 @@ def score_answers(answers: dict, row: pd.Series, stage: str) -> int:
     """Calculate correct answers count."""
     if stage == "pre":
         return (
-            (1 if answers.get("q1") == row["Pre_A1"] else 0)
-            + (1 if answers.get("q2") == row["Pre_A2"] else 0)
+            (1 if answers.get("q1") == str(row["Pre_A1"]).strip() else 0)
+            + (1 if answers.get("q2") == str(row["Pre_A2"]).strip() else 0)
         )
     return (
-        (1 if answers.get("q1") == row["Post_A1"] else 0)
-        + (1 if answers.get("q2") == row["Post_A2"] else 0)
+        (1 if answers.get("q1") == str(row["Post_A1"]).strip() else 0)
+        + (1 if answers.get("q2") == str(row["Post_A2"]).strip() else 0)
     )
 
 
@@ -453,8 +510,8 @@ def main() -> None:
         return
 
     df_cms = load_cms()
-    if df_cms is None:
-        st.error("❌ Could not load CMS content. Check the Google Sheet URL.")
+    if df_cms is None or df_cms.empty:
+        st.error("❌ Could not load CMS content from Supabase or Google Sheets. Check database table and Sheet sharing permissions.")
         st.stop()
 
     render_learning_portal(df_cms)
