@@ -20,13 +20,14 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # CONSTANTS & CONFIG
 # ---------------------------------------------------------------------------
-CMS_CSV_URL = (
+CMS_TABLE_NAME         = "TheVault_CMS_Core"
+CMS_CSV_URL            = (
     "https://docs.google.com/spreadsheets/d/"
     "1sxxEyxjvicryUGJRMcd05Hcy6rIFLuXiTZPR_Mco7n8"
     "/export?format=csv&gid=0"
 )
 ADMIN_PASSWORD         = "vault2026"
-VIDEO_COMPLETE_RATIO   = 0.9     # 90% of video length = "Completed"
+VIDEO_COMPLETE_RATIO   = 0.9
 DEFAULT_VIDEO_LEN_SEC  = 85
 NY_TZ                  = pytz.timezone("US/Eastern")
 
@@ -150,18 +151,28 @@ def _normalize_cms_df(df: pd.DataFrame) -> pd.DataFrame:
 
 @st.cache_data(ttl=60)
 def load_cms() -> pd.DataFrame | None:
-    """Load CMS stories from Supabase with Google Sheets fallback."""
-    # 1. Attempt load from Supabase vault_curriculum
+    """Load CMS stories from Supabase (TheVault_CMS_Core) with Google Sheets fallback."""
+    # 1. Attempt load from Supabase
     if supabase:
         try:
-            response = supabase.table("vault_curriculum").select("*").execute()
+            response = supabase.table(CMS_TABLE_NAME).select("*").execute()
             if response.data and len(response.data) > 0:
                 df = pd.DataFrame(response.data)
                 return _normalize_cms_df(df)
             else:
-                logger.info("Supabase 'vault_curriculum' empty. Falling back to Google Sheet.")
+                logger.info(f"Supabase '{CMS_TABLE_NAME}' empty. Falling back to Google Sheet.")
         except Exception as e:
-            logger.warning(f"Supabase CMS fetch error: {e}. Falling back to Google Sheet.")
+            logger.warning(f"Supabase CMS fetch error on '{CMS_TABLE_NAME}': {e}. Falling back to Google Sheet.")
+
+    # 2. Fallback to Google Sheets CSV export
+    try:
+        df = pd.read_csv(CMS_CSV_URL)
+        if not df.empty:
+            return _normalize_cms_df(df)
+    except Exception as e:
+        logger.error(f"Google Sheet fetch failed: {e}")
+
+    return None
 
     # 2. Fallback to Google Sheets CSV export
     try:
