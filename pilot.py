@@ -100,15 +100,16 @@ supabase = get_supabase_client()
 
 @st.cache_data(ttl=60)
 def load_cms() -> pd.DataFrame | None:
-    """Load CMS content from the public Google Sheet."""
+    """Load CMS stories directly from the Supabase database."""
+    if not supabase:
+        return None
     try:
-        df = pd.read_csv(CMS_CSV_URL)
-        if df.empty:
-            logger.warning("CMS sheet loaded but contains no rows.")
-            return None
-        return df
+        response = supabase.table("vault_curriculum").select("*").execute()
+        if response.data:
+            return pd.DataFrame(response.data)
+        return None
     except Exception as e:
-        logger.error("CMS load failed: %s", e)
+        logger.error(f"Failed to fetch CMS from Supabase: {e}")
         return None
 
 
