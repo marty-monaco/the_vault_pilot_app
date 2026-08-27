@@ -123,7 +123,25 @@ def get_supabase_client() -> Client | None:
         logger.error(f"Failed to initialize Supabase client: {e}")
         return None
 
-
+st.write("DEBUG — record being sent:", record)
+client = get_supabase_client()
+st.write("DEBUG — Supabase client:", "Connected" if client else "NOT CONNECTED")
+try:
+    response = client.table("pilot_mastery_logs").insert({
+        "class_code": str(record["Class"]),
+        "student_id": str(record["Student"]),
+        "topic":      str(record["Topic"]),
+        "pre_score":  int(record["Pre_Score"]),
+        "post_score": int(record["Post_Score"]),
+        "lift":       int(record["Lift"]),
+        "nps":        int(record["NPS"]),
+        "duration":   int(record["Duration"]),
+        "status":     str(record["Status"]),
+    }).execute()
+    st.write("DEBUG — Supabase response:", response)
+except Exception as e:
+    st.write("DEBUG — Supabase error:", str(e))
+    
 def append_log(record: dict) -> None:
     """Append one result row directly into Supabase."""
     client = get_supabase_client()
