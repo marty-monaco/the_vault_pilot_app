@@ -2,8 +2,8 @@
 the_vault_pilot_app/pilot.py
 
 Student-facing delivery layer for The Vault.
-Reads curriculum content from Supabase (with Google Sheets fallback), runs
-pre/post assessments, embeds normalized video, collects NPS, and logs mastery data to Supabase.
+Reads CMS from Supabase (Google Sheets fallback), runs pre/post assessments,
+embeds video, collects NPS, and logs mastery data to Supabase.
 """
 import os
 import re
@@ -18,18 +18,19 @@ from supabase import create_client, Client
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# CONSTANTS & CONFIG
+# CONSTANTS
 # ---------------------------------------------------------------------------
-CMS_TABLE_NAME         = "TheVault_CMS_Core"
-CMS_CSV_URL            = (
+CMS_TABLE_NAME        = "TheVault_CMS_Core"
+LOGS_TABLE_NAME       = "pilot_mastery_logs"
+CMS_CSV_URL           = (
     "https://docs.google.com/spreadsheets/d/"
     "1sxxEyxjvicryUGJRMcd05Hcy6rIFLuXiTZPR_Mco7n8"
     "/export?format=csv&gid=0"
 )
-ADMIN_PASSWORD         = "vault2026"
-VIDEO_COMPLETE_RATIO   = 0.9
-DEFAULT_VIDEO_LEN_SEC  = 85
-NY_TZ                  = pytz.timezone("US/Eastern")
+ADMIN_PASSWORD        = "vault2026"
+VIDEO_COMPLETE_RATIO  = 0.9
+DEFAULT_VIDEO_LEN_SEC = 85
+NY_TZ                 = pytz.timezone("US/Eastern")
 
 NPS_RATINGS = [
     ("😴 Boring", 2),
@@ -40,7 +41,7 @@ NPS_RATINGS = [
 ]
 
 YT_PATTERN = re.compile(
-    r'(?:v=|\/([0-9A-Za-z_-]{11})|youtu\.be\/|\/shorts\/|\/embed\/)([0-9A-Za-z_-]{11})'
+    r'(?:v=|youtu\.be\/|\/shorts\/|\/embed\/)([0-9A-Za-z_-]{11})'
 )
 
 # ---------------------------------------------------------------------------
@@ -79,15 +80,15 @@ for k, v in SESSION_DEFAULTS.items():
     st.session_state.setdefault(k, v)
 
 # ---------------------------------------------------------------------------
-# DATABASE INITIALIZATION
+# SUPABASE CLIENT — single initialisation, cached for session
 # ---------------------------------------------------------------------------
 
 @st.cache_resource
 def get_supabase_client() -> Client | None:
-    """Connect to Supabase supporting nested, flat, and environment variable configurations."""
-    url, key = None, None
+    """Return a cached Supabase client from secrets or environment variables."""
+    url = key = None
 
-    # 1. Nested [supabase] section in secrets
+    # Check nested [supabase] block first, then flat root keys, then env vars
     try:
         if "supabase" in st.secrets:
             url = st.secrets["supabase"].get("SUPABASE_URL")
@@ -95,191 +96,117 @@ def get_supabase_client() -> Client | None:
     except Exception:
         pass
 
-    # 2. Flat root keys in st.secrets
     if not url:
-        try:
-            url = st.secrets.get("SUPABASE_URL")
-        except Exception:
-            pass
+        url = st.secrets.get("SUPABASE_URL") or os.environ.get("SUPABASE_URL")
     if not key:
-        try:
-            key = st.secrets.get("SUPABASE_KEY")
-        except Exception:
-            pass
-
-    # 3. Environment variables fallback
-    if not url:
-        url = os.environ.get("SUPABASE_URL")
-    if not key:
-        key = os.environ.get("SUPABASE_KEY")
+        key = st.secrets.get("SUPABASE_KEY") or os.environ.get("SUPABASE_KEY")
 
     if not url or not key:
-        logger.error("Supabase URL or Key could not be resolved from secrets or environment.")
+        logger.error("SUPABASE_URL or SUPABASE_KEY not found in secrets or environment.")
         return None
 
     try:
         return create_client(str(url).strip(), str(key).strip())
     except Exception as e:
-        logger.error(f"Failed to initialize Supabase client: {e}")
-        return None
-        s
-def append_log(record: dict) -> None:
-    """Append one result row directly into Supabase."""
-    client = get_supabase_client()
-    if not client:
-        raise RuntimeError("Supabase client is not connected. Check your SUPABASE_URL and SUPABASE_KEY secrets.")
-
-    payload = {
-        "class_code": str(record["Class"]),
-        "student_id": str(record["Student"]),
-        "topic":      str(record["Topic"]),
-        "pre_score":  int(record["Pre_Score"]),
-        "post_score": int(record["Post_Score"]),
-        "lift":       int(record["Lift"]),
-        "nps":        int(record["NPS"]),
-        "duration":   int(record["Duration"]),
-        "status":     str(record["Status"]),
-    }
-    response = client.table("pilot_mastery_logs").insert(payload).execute()
-    if not response.data:
-        raise RuntimeError("Supabase accepted request but returned no data.")
-
-
-def load_logs() -> pd.DataFrame | None:
-    """Fetch mastery logs from Supabase."""
-    client = get_supabase_client()
-    if not client:
-        st.error("⚠️ Supabase credentials not found or client failed to connect.")
-        return None
-    try:
-        response = client.table("pilot_mastery_logs").select("*").order("created_at", desc=True).execute()
-        if response.data:
-            df = pd.DataFrame(response.data)
-            return df.rename(columns={
-                "created_at": "Timestamp",
-                "class_code": "Class",
-                "student_id": "Student",
-                "topic":      "Topic",
-                "pre_score":  "Pre_Score",
-                "post_score": "Post_Score",
-                "lift":       "Lift",
-                "nps":        "NPS",
-                "duration":   "Duration",
-                "status":     "Status",
-            })
-        return None
-    except Exception as e:
-        logger.error(f"Supabase load error: {e}")
+        logger.error("Supabase client init failed: %s", e)
         return None
 
-
-supabase = get_supabase_client()
 
 # ---------------------------------------------------------------------------
-# DATA LOADING & PERSISTENCE
+# CMS LOADING
 # ---------------------------------------------------------------------------
 
 def _normalize_cms_df(df: pd.DataFrame) -> pd.DataFrame:
-    """Map lowercase DB column names to the PascalCase format used across UI."""
+    """Map snake_case DB column names to the PascalCase format used in the UI."""
     col_map = {
-        "topic": "Topic",
-        "video_url": "Video_URL",
+        "topic":          "Topic",
+        "video_url":      "Video_URL",
         "video_length_sec": "Video_Length_Sec",
-        "pre_q1": "Pre_Q1",
-        "pre_opt1": "Pre_Opt1",
-        "pre_opt2": "Pre_Opt2",
-        "pre_opt3": "Pre_Opt3",
-        "pre_opt4": "Pre_Opt4",
-        "pre_a1": "Pre_A1",
-        "pre_q2": "Pre_Q2",
-        "pre_opt1_q2": "Pre_Opt1_Q2",
-        "pre_opt2_q2": "Pre_Opt2_Q2",
-        "pre_opt3_q2": "Pre_Opt3_Q2",
-        "pre_opt4_q2": "Pre_Opt4_Q2",
-        "pre_a2": "Pre_A2",
-        "post_q1": "Post_Q1",
-        "post_opt1": "Post_Opt1",
-        "post_opt2": "Post_Opt2",
-        "post_opt3": "Post_Opt3",
-        "post_opt4": "Post_Opt4",
-        "post_a1": "Post_A1",
-        "post_q2": "Post_Q2",
-        "post_opt1_q2": "Post_Opt1_Q2",
-        "post_opt2_q2": "Post_Opt2_Q2",
-        "post_opt3_q2": "Post_Opt3_Q2",
-        "post_opt4_q2": "Post_Opt4_Q2",
-        "post_a2": "Post_A2",
+        "pre_q1":         "Pre_Q1",
+        "pre_opt1":       "Pre_Opt1",
+        "pre_opt2":       "Pre_Opt2",
+        "pre_opt3":       "Pre_Opt3",
+        "pre_opt4":       "Pre_Opt4",
+        "pre_a1":         "Pre_A1",
+        "pre_q2":         "Pre_Q2",
+        "pre_opt1_q2":    "Pre_Opt1_Q2",
+        "pre_opt2_q2":    "Pre_Opt2_Q2",
+        "pre_opt3_q2":    "Pre_Opt3_Q2",
+        "pre_opt4_q2":    "Pre_Opt4_Q2",
+        "pre_a2":         "Pre_A2",
+        "post_q1":        "Post_Q1",
+        "post_opt1":      "Post_Opt1",
+        "post_opt2":      "Post_Opt2",
+        "post_opt3":      "Post_Opt3",
+        "post_opt4":      "Post_Opt4",
+        "post_a1":        "Post_A1",
+        "post_q2":        "Post_Q2",
+        "post_opt1_q2":   "Post_Opt1_Q2",
+        "post_opt2_q2":   "Post_Opt2_Q2",
+        "post_opt3_q2":   "Post_Opt3_Q2",
+        "post_opt4_q2":   "Post_Opt4_Q2",
+        "post_a2":        "Post_A2",
     }
     return df.rename(columns=col_map)
 
 
 @st.cache_data(ttl=60)
 def load_cms() -> pd.DataFrame | None:
-    """Load CMS stories from Supabase (TheVault_CMS_Core) with Google Sheets fallback."""
-    # 1. Attempt load from Supabase
-    if supabase:
+    """Load CMS stories from Supabase with Google Sheets as fallback."""
+    client = get_supabase_client()
+
+    # Primary: Supabase
+    if client:
         try:
-            response = supabase.table(CMS_TABLE_NAME).select("*").execute()
-            if response.data and len(response.data) > 0:
+            response = client.table(CMS_TABLE_NAME).select("*").execute()
+            if response.data:
                 df = pd.DataFrame(response.data)
+                logger.info("CMS loaded from Supabase (%d rows).", len(df))
                 return _normalize_cms_df(df)
-            else:
-                logger.info(f"Supabase '{CMS_TABLE_NAME}' empty. Falling back to Google Sheet.")
+            logger.warning("Supabase CMS table '%s' is empty.", CMS_TABLE_NAME)
         except Exception as e:
-            logger.warning(f"Supabase CMS fetch error on '{CMS_TABLE_NAME}': {e}. Falling back to Google Sheet.")
+            logger.warning("Supabase CMS fetch failed: %s. Falling back to Google Sheets.", e)
 
-    # 2. Fallback to Google Sheets CSV export
+    # Fallback: Google Sheets
     try:
         df = pd.read_csv(CMS_CSV_URL)
         if not df.empty:
+            logger.info("CMS loaded from Google Sheets fallback (%d rows).", len(df))
             return _normalize_cms_df(df)
     except Exception as e:
-        logger.error(f"Google Sheet fetch failed: {e}")
-
-    return None
-
-    # 2. Fallback to Google Sheets CSV export
-    try:
-        df = pd.read_csv(CMS_CSV_URL)
-        if not df.empty:
-            return _normalize_cms_df(df)
-    except Exception as e:
-        logger.error(f"Google Sheet fetch failed: {e}")
+        logger.error("Google Sheets CMS fallback failed: %s", e)
 
     return None
 
 
-def load_logs() -> pd.DataFrame | None:
-    """Fetch mastery logs from Supabase."""
-    if not supabase:
-        st.error("⚠️ Supabase credentials not found in secrets.")
-        return None
-    try:
-        response = supabase.table("pilot_mastery_logs").select("*").order("created_at", desc=True).execute()
-        if response.data:
-            df = pd.DataFrame(response.data)
-            return df.rename(columns={
-                "created_at": "Timestamp",
-                "class_code": "Class",
-                "student_id": "Student",
-                "topic":      "Topic",
-                "pre_score":  "Pre_Score",
-                "post_score": "Post_Score",
-                "lift":       "Lift",
-                "nps":        "NPS",
-                "duration":   "Duration",
-                "status":     "Status",
-            })
-        return None
-    except Exception as e:
-        logger.error(f"Supabase load error: {e}")
-        return None
-
+# ---------------------------------------------------------------------------
+# MASTERY LOG — READ & WRITE
+# ---------------------------------------------------------------------------
 
 def append_log(record: dict) -> None:
-    """Append one result row directly into Supabase."""
-    if not supabase:
-        raise RuntimeError("Supabase client is not connected.")
+    """Insert one mastery result row into Supabase pilot_mastery_logs.
+
+    Column mapping (record key → Supabase column):
+        Class      → class_code
+        Student    → student_id
+        Topic      → topic
+        Pre_Score  → pre_score
+        Post_Score → post_score
+        Lift       → lift
+        NPS        → nps
+        Duration   → duration      ← matches SQL schema (not Duration_Sec)
+        Status     → status
+
+    Timestamp is omitted — Supabase sets created_at automatically.
+
+    Raises:
+        RuntimeError: if Supabase client unavailable or insert returns no data.
+    """
+    client = get_supabase_client()
+    if not client:
+        raise RuntimeError(
+            "Supabase client not connected. Check SUPABASE_URL and SUPABASE_KEY in secrets."
+        )
 
     payload = {
         "class_code": str(record["Class"]),
@@ -289,67 +216,91 @@ def append_log(record: dict) -> None:
         "post_score": int(record["Post_Score"]),
         "lift":       int(record["Lift"]),
         "nps":        int(record["NPS"]),
-        "duration":   int(record["Duration"]),
+        "duration":   int(record["Duration"]),   # matches SQL column name
         "status":     str(record["Status"]),
     }
-    response = supabase.table("pilot_mastery_logs").insert(payload).execute()
+
+    response = client.table(LOGS_TABLE_NAME).insert(payload).execute()
     if not response.data:
-        raise RuntimeError("Failed to insert record into Supabase.")
+        raise RuntimeError("Supabase insert returned no confirmation data.")
+
+
+def load_logs() -> pd.DataFrame | None:
+    """Fetch all mastery logs from Supabase, newest first."""
+    client = get_supabase_client()
+    if not client:
+        st.error("⚠️ Supabase not connected — check secrets.")
+        return None
+    try:
+        response = (
+            client.table(LOGS_TABLE_NAME)
+            .select("*")
+            .order("created_at", desc=True)
+            .execute()
+        )
+        if not response.data:
+            return None
+
+        df = pd.DataFrame(response.data)
+        return df.rename(columns={
+            "created_at": "Timestamp",
+            "class_code": "Class",
+            "student_id": "Student",
+            "topic":      "Topic",
+            "pre_score":  "Pre_Score",
+            "post_score": "Post_Score",
+            "lift":       "Lift",
+            "nps":        "NPS",
+            "duration":   "Duration",
+            "status":     "Status",
+        })
+    except Exception as e:
+        logger.error("Supabase load_logs failed: %s", e)
+        st.error(f"⚠️ Could not load logs from Supabase: {e}")
+        return None
+
 
 # ---------------------------------------------------------------------------
 # HELPERS
 # ---------------------------------------------------------------------------
 
 def resolve_video_url(raw_url: str) -> str | None:
-    """Return a clean YouTube watch URL, direct video link, or None."""
     raw_url = str(raw_url).strip()
     match = YT_PATTERN.search(raw_url)
     if match:
-        video_id = match.group(1) or match.group(2)
-        return f"https://www.youtube.com/watch?v={video_id}"
-    if raw_url.startswith("http"):
-        return raw_url
-    return None
+        return f"https://www.youtube.com/watch?v={match.group(1)}"
+    return raw_url if raw_url.startswith("http") else None
 
 
 def build_shuffled_questions(row: pd.Series, stage: str) -> list[dict]:
     """Build and shuffle question pool for pre or post stage."""
+    def _opts(keys):
+        return random.sample(
+            [str(row.get(k)) for k in keys
+             if pd.notna(row.get(k)) and str(row.get(k)).strip()],
+            len([k for k in keys
+                 if pd.notna(row.get(k)) and str(row.get(k)).strip()])
+        )
+
     if stage == "pre":
-        opts_q1 = [row.get("Pre_Opt1"), row.get("Pre_Opt2"), row.get("Pre_Opt3")]
-        if pd.notna(row.get("Pre_Opt4")):
-            opts_q1.append(row.get("Pre_Opt4"))
-        opts_q1 = [str(o) for o in opts_q1 if pd.notna(o) and str(o).strip()]
-
-        opts_q2 = [row.get("Pre_Opt1_Q2"), row.get("Pre_Opt2_Q2"), row.get("Pre_Opt3_Q2")]
-        if pd.notna(row.get("Pre_Opt4_Q2")):
-            opts_q2.append(row.get("Pre_Opt4_Q2"))
-        opts_q2 = [str(o) for o in opts_q2 if pd.notna(o) and str(o).strip()]
-
         pool = [
-            {"id": "q1", "text": row["Pre_Q1"], "options": random.sample(opts_q1, len(opts_q1))},
-            {"id": "q2", "text": row["Pre_Q2"], "options": random.sample(opts_q2, len(opts_q2))},
+            {"id": "q1", "text": row["Pre_Q1"],
+             "options": _opts(["Pre_Opt1", "Pre_Opt2", "Pre_Opt3", "Pre_Opt4"])},
+            {"id": "q2", "text": row["Pre_Q2"],
+             "options": _opts(["Pre_Opt1_Q2", "Pre_Opt2_Q2", "Pre_Opt3_Q2", "Pre_Opt4_Q2"])},
         ]
     else:
-        opts_q1 = [row.get("Post_Opt1"), row.get("Post_Opt2"), row.get("Post_Opt3")]
-        if pd.notna(row.get("Post_Opt4")):
-            opts_q1.append(row.get("Post_Opt4"))
-        opts_q1 = [str(o) for o in opts_q1 if pd.notna(o) and str(o).strip()]
-
-        opts_q2 = [row.get("Post_Opt1_Q2"), row.get("Post_Opt2_Q2"), row.get("Post_Opt3_Q2")]
-        if pd.notna(row.get("Post_Opt4_Q2")):
-            opts_q2.append(row.get("Post_Opt4_Q2"))
-        opts_q2 = [str(o) for o in opts_q2 if pd.notna(o) and str(o).strip()]
-
         pool = [
-            {"id": "q1", "text": row["Post_Q1"], "options": random.sample(opts_q1, len(opts_q1))},
-            {"id": "q2", "text": row["Post_Q2"], "options": random.sample(opts_q2, len(opts_q2))},
+            {"id": "q1", "text": row["Post_Q1"],
+             "options": _opts(["Post_Opt1", "Post_Opt2", "Post_Opt3", "Post_Opt4"])},
+            {"id": "q2", "text": row["Post_Q2"],
+             "options": _opts(["Post_Opt1_Q2", "Post_Opt2_Q2", "Post_Opt3_Q2", "Post_Opt4_Q2"])},
         ]
     random.shuffle(pool)
     return pool
 
 
 def score_answers(answers: dict, row: pd.Series, stage: str) -> int:
-    """Calculate correct answers count."""
     if stage == "pre":
         return (
             (1 if answers.get("q1") == str(row["Pre_A1"]).strip() else 0)
@@ -375,7 +326,7 @@ def render_mastery_badge(initials: str, lift: int) -> None:
 # ---------------------------------------------------------------------------
 
 def render_admin() -> None:
-    st.title("🔐 Admin Dashboard (Supabase Real-Time)")
+    st.title("🔐 Admin Dashboard")
     pw = st.text_input("Access Key", type="password")
 
     if not pw:
@@ -397,16 +348,19 @@ def render_admin() -> None:
     c3.metric("Avg Duration", f"{int(df_logs['Duration'].mean())}s")
     c4.metric("Avg NPS",      f"{df_logs['NPS'].mean():.1f}")
 
-    st.dataframe(df_logs.sort_values("Timestamp", ascending=False), use_container_width=True)
+    st.dataframe(
+        df_logs.sort_values("Timestamp", ascending=False),
+        use_container_width=True,
+    )
     st.download_button(
-        label="📥 Download Supabase Pilot CSV",
+        label="📥 Download Pilot CSV",
         data=df_logs.to_csv(index=False),
-        file_name=f"vault_pilot_supabase_{datetime.now(NY_TZ).strftime('%Y%m%d')}.csv",
+        file_name=f"vault_pilot_{datetime.now(NY_TZ).strftime('%Y%m%d')}.csv",
         mime="text/csv",
     )
 
 # ---------------------------------------------------------------------------
-# LEARNING PORTAL — STEP 1: PRE-TEST
+# LEARNING PORTAL — PRE-TEST
 # ---------------------------------------------------------------------------
 
 def render_pre_test(row: pd.Series) -> None:
@@ -419,17 +373,13 @@ def render_pre_test(row: pd.Series) -> None:
     for idx, q in enumerate(st.session_state.shuffled_pre):
         p_ans[q["id"]] = st.radio(
             f"Question {idx + 1}: {q['text']}",
-            q["options"],
-            index=None,
-            key=f"p_{q['id']}",
+            q["options"], index=None, key=f"p_{q['id']}",
         )
 
     st.divider()
     c1, c2 = st.columns(2)
-    with c1:
-        class_code = st.text_input("Class Code")
-    with c2:
-        student_id = st.text_input("Your Initials")
+    with c1: class_code = st.text_input("Class Code")
+    with c2: student_id = st.text_input("Your Initials")
 
     if st.button("ENTER THE VAULT ⚡", use_container_width=True, type="primary"):
         if not class_code or not student_id:
@@ -438,17 +388,14 @@ def render_pre_test(row: pd.Series) -> None:
             st.warning("Please answer both questions before proceeding.")
         else:
             st.session_state.update({
-                "class_code": class_code,
-                "student_id": student_id,
-                "ans_pre1":   p_ans["q1"],
-                "ans_pre2":   p_ans["q2"],
-                "start_time": datetime.now(NY_TZ),
-                "step":       "vault_content",
+                "class_code": class_code, "student_id": student_id,
+                "ans_pre1": p_ans["q1"], "ans_pre2": p_ans["q2"],
+                "start_time": datetime.now(NY_TZ), "step": "vault_content",
             })
             st.rerun()
 
 # ---------------------------------------------------------------------------
-# LEARNING PORTAL — STEP 2: VIDEO + PULSE CHECK
+# LEARNING PORTAL — VIDEO + PULSE CHECK
 # ---------------------------------------------------------------------------
 
 def render_vault_content(row: pd.Series) -> None:
@@ -470,9 +417,7 @@ def render_vault_content(row: pd.Series) -> None:
     for idx, q in enumerate(st.session_state.shuffled_post):
         pst_ans[q["id"]] = st.radio(
             f"Question {idx + 1}: {q['text']}",
-            q["options"],
-            index=None,
-            key=f"pst_{q['id']}",
+            q["options"], index=None, key=f"pst_{q['id']}",
         )
 
     st.divider()
@@ -495,7 +440,6 @@ def render_vault_content(row: pd.Series) -> None:
 
 
 def _submit_results(row: pd.Series, pst_ans: dict) -> None:
-    """Score, persist to Supabase, and render results."""
     now     = datetime.now(NY_TZ)
     elapsed = (now - st.session_state.start_time).total_seconds()
 
@@ -519,29 +463,10 @@ def _submit_results(row: pd.Series, pst_ans: dict) -> None:
         "Status":     status,
     }
 
-st.write("DEBUG — record being sent:", record)
-client = get_supabase_client()
-st.write("DEBUG — Supabase client:", "Connected" if client else "NOT CONNECTED")
-try:
-    response = client.table("pilot_mastery_logs").insert({
-        "class_code": str(record["Class"]),
-        "student_id": str(record["Student"]),
-        "topic":      str(record["Topic"]),
-        "pre_score":  int(record["Pre_Score"]),
-        "post_score": int(record["Post_Score"]),
-        "lift":       int(record["Lift"]),
-        "nps":        int(record["NPS"]),
-        "duration":   int(record["Duration"]),
-        "status":     str(record["Status"]),
-    }).execute()
-    st.write("DEBUG — Supabase response:", response)
-except Exception as e:
-    st.write("DEBUG — Supabase error:", str(e))
-        
     try:
         append_log(record)
     except Exception as e:
-        st.error(f"❌ Failed to persist results to Supabase: {e}")
+        st.error(f"❌ Failed to save results: {e}")
         return
 
     if status == "Completed":
@@ -549,7 +474,7 @@ except Exception as e:
         render_mastery_badge(st.session_state.student_id, lift)
     else:
         st.warning(
-            f"Mastery logged to cloud! (Lift: {lift:+d}) "
+            f"Mastery logged! (Lift: {lift:+d}) "
             "Try watching the full video next time to earn a badge."
         )
 
@@ -559,7 +484,6 @@ except Exception as e:
 
 def render_learning_portal(df_cms: pd.DataFrame) -> None:
     topic_list = df_cms["Topic"].tolist()
-
     st.markdown("### 🏛️ Select Your Vault Story")
 
     n_cols = 3
@@ -567,10 +491,7 @@ def render_learning_portal(df_cms: pd.DataFrame) -> None:
         grid_cols = st.columns(n_cols)
         for j, t in enumerate(topic_list[i:i + n_cols]):
             if grid_cols[j].button(f"📖 {t}", use_container_width=True):
-                st.session_state.update({
-                    **SESSION_DEFAULTS,
-                    "active_topic": t,
-                })
+                st.session_state.update({**SESSION_DEFAULTS, "active_topic": t})
                 st.rerun()
 
     st.divider()
@@ -605,7 +526,10 @@ def main() -> None:
 
     df_cms = load_cms()
     if df_cms is None or df_cms.empty:
-        st.error("❌ Could not load CMS content from Supabase or Google Sheets. Check database table and Sheet sharing permissions.")
+        st.error(
+            "❌ Could not load CMS content from Supabase or Google Sheets. "
+            "Check database table and Sheet sharing permissions."
+        )
         st.stop()
 
     render_learning_portal(df_cms)
