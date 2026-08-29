@@ -60,24 +60,25 @@ st.markdown("""
 # SESSION STATE & COHORT ROUTING
 # ---------------------------------------------------------------------------
 SESSION_DEFAULTS = {
-    "step":          "pre_test",
-    "active_topic":  None,
-    "start_time":    None,
-    "nps_score":     None,
-    "ans_pre1":      None,
-    "ans_pre2":      None,
-    "class_code":    "",
-    "student_id":    "",
-    "shuffled_pre":  None,
-    "shuffled_post": None,
+    "step":            "pre_test",
+    "active_topic":    None,
+    "start_time":      None,
+    "nps_score":       None,
+    "ans_pre1":        None,
+    "ans_pre2":        None,
+    "class_code":      "",
+    "student_id":      "",
+    "shuffled_pre":    None,
+    "shuffled_post":   None,
+    "active_pilot_id": DEFAULT_PILOT_ID,
 }
 for k, v in SESSION_DEFAULTS.items():
     st.session_state.setdefault(k, v)
 
-# Resolve pilot_id from URL query parameter (e.g. ?pilot=CRIM171) or default
-url_pilot = st.query_params.get("pilot", DEFAULT_PILOT_ID)
-if "active_pilot_id" not in st.session_state:
-    st.session_state.active_pilot_id = url_pilot
+# Override with URL parameter if passed (?pilot=...)
+url_pilot = st.query_params.get("pilot")
+if url_pilot:
+    st.session_state.active_pilot_id = str(url_pilot)
 
 # ---------------------------------------------------------------------------
 # DATABASE INITIALIZATION
@@ -213,85 +214,12 @@ def append_log(record: dict) -> None:
         "status":         str(record.get("Status", "Completed")),
     }
 
-    # Include raw_responses JSON only if provided
     if "Raw_Responses" in record and record["Raw_Responses"] is not None:
         payload["raw_responses"] = record["Raw_Responses"]
 
     response = client.table("pilot_mastery_logs").insert(payload).execute()
     if not response.data:
         raise RuntimeError("Failed to insert record into Supabase.")
-def _submit_results(row: pd.Series, pst_ans: dict) -> None:
-    """Score, structure question-level JSON telemetry, and persist."""
-    now     = datetime.now(NY_TZ)
-    elapsed = (now - st.session_state.start_time).total_seconds()
-
-    pre_answers = {"q1": st.session_state.ans_pre1, "q2": st.session_state.ans_pre2}
-    s_pre  = score_answers(pre_answers, row, "pre")
-    s_post = score_answers(pst_ans, row, "post")
-    lift   = s_post - s_pre
-
-    video_len = float(row.get("Video_Length_Sec", DEFAULT_VIDEO_LEN_SEC))
-    status    = "Completed" if elapsed >= video_len * VIDEO_COMPLETE_RATIO else "Skimmed"
-
-    # Build the JSON response object safely
-    raw_responses = {
-        "pre": {
-            "q1": {
-                "question": str(row.get("Pre_Q1", "")),
-                "selected": st.session_state.ans_pre1,
-                "correct_answer": str(row.get("Pre_A1", "")).strip(),
-                "is_correct": st.session_state.ans_pre1 == str(row.get("Pre_A1", "")).strip(),
-            },
-            "q2": {
-                "question": str(row.get("Pre_Q2", "")),
-                "selected": st.session_state.ans_pre2,
-                "correct_answer": str(row.get("Pre_A2", "")).strip(),
-                "is_correct": st.session_state.ans_pre2 == str(row.get("Pre_A2", "")).strip(),
-            },
-        },
-        "post": {
-            "q1": {
-                "question": str(row.get("Post_Q1", "")),
-                "selected": pst_ans.get("q1"),
-                "correct_answer": str(row.get("Post_A1", "")).strip(),
-                "is_correct": pst_ans.get("q1") == str(row.get("Post_A1", "")).strip(),
-            },
-            "q2": {
-                "question": str(row.get("Post_Q2", "")),
-                "selected": pst_ans.get("q2"),
-                "correct_answer": str(row.get("Post_A2", "")).strip(),
-                "is_correct": pst_ans.get("q2") == str(row.get("Post_A2", "")).strip(),
-            },
-        },
-    }
-
-    record = {
-        "Class":          st.session_state.class_code,
-        "Student":        st.session_state.student_id,
-        "Topic":          st.session_state.active_topic,
-        "Pre_Score":      s_pre,
-        "Post_Score":     s_post,
-        "Lift":           lift,
-        "NPS":            st.session_state.nps_score,
-        "Duration":       int(elapsed),
-        "Status":         status,
-        "Raw_Responses":  raw_responses,
-    }
-
-    try:
-        append_log(record)
-    except Exception as e:
-        st.error(f"❌ Failed to persist results to Supabase: {e}")
-        return
-
-    if status == "Completed":
-        st.balloons()
-        render_mastery_badge(st.session_state.student_id, lift)
-    else:
-        st.warning(
-            f"Mastery logged to cloud! (Lift: {lift:+d}) "
-            "Try watching the full video next time to earn a badge."
-        )
 
 # ---------------------------------------------------------------------------
 # HELPERS
@@ -323,8 +251,8 @@ def build_shuffled_questions(row: pd.Series, stage: str) -> list[dict]:
         opts_q2 = [str(o) for o in opts_q2 if pd.notna(o) and str(o).strip()]
 
         pool = [
-            {"id": "q1", "text": row["Pre_Q1"], "options": random.sample(opts_q1, len(opts_q1))},
-            {"id": "q2", "text": row["Pre_Q2"], "options": random.sample(opts_q2, len(opts_q2))},
+            {"id": "q1", "text": str(row.get("Pre_Q1", "")), "options": random.sample(opts_q1, len(opts_q1))},
+            {"id": "q2", "text": str(row.get("Pre_Q2", "")), "options": random.sample(opts_q2, len(opts_q2))},
         ]
     else:
         opts_q1 = [row.get("Post_Opt1"), row.get("Post_Opt2"), row.get("Post_Opt3")]
@@ -338,8 +266,8 @@ def build_shuffled_questions(row: pd.Series, stage: str) -> list[dict]:
         opts_q2 = [str(o) for o in opts_q2 if pd.notna(o) and str(o).strip()]
 
         pool = [
-            {"id": "q1", "text": row["Post_Q1"], "options": random.sample(opts_q1, len(opts_q1))},
-            {"id": "q2", "text": row["Post_Q2"], "options": random.sample(opts_q2, len(opts_q2))},
+            {"id": "q1", "text": str(row.get("Post_Q1", "")), "options": random.sample(opts_q1, len(opts_q1))},
+            {"id": "q2", "text": str(row.get("Post_Q2", "")), "options": random.sample(opts_q2, len(opts_q2))},
         ]
     random.shuffle(pool)
     return pool
@@ -349,12 +277,12 @@ def score_answers(answers: dict, row: pd.Series, stage: str) -> int:
     """Calculate correct answers count."""
     if stage == "pre":
         return (
-            (1 if answers.get("q1") == str(row["Pre_A1"]).strip() else 0)
-            + (1 if answers.get("q2") == str(row["Pre_A2"]).strip() else 0)
+            (1 if str(answers.get("q1", "")).strip() == str(row.get("Pre_A1", "")).strip() else 0)
+            + (1 if str(answers.get("q2", "")).strip() == str(row.get("Pre_A2", "")).strip() else 0)
         )
     return (
-        (1 if answers.get("q1") == str(row["Post_A1"]).strip() else 0)
-        + (1 if answers.get("q2") == str(row["Post_A2"]).strip() else 0)
+        (1 if str(answers.get("q1", "")).strip() == str(row.get("Post_A1", "")).strip() else 0)
+        + (1 if str(answers.get("q2", "")).strip() == str(row.get("Post_A2", "")).strip() else 0)
     )
 
 
@@ -368,7 +296,7 @@ def render_mastery_badge(initials: str, lift: int) -> None:
     )
 
 # ---------------------------------------------------------------------------
-# ADMIN PANEL (VISUAL TELEMETRY & ITEM DISCRIMINATION)
+# ADMIN PANEL (MULTI-PILOT COHORT ANALYTICS)
 # ---------------------------------------------------------------------------
 
 def render_admin() -> None:
@@ -388,7 +316,7 @@ def render_admin() -> None:
         st.info("No student telemetry logged in Supabase yet.")
         return
 
-    # 1. COHORT FILTERING
+    # Cohort filtering
     cohort_col, topic_col = st.columns(2)
     with cohort_col:
         available_pilots = ["All Cohorts"] + sorted(list(df_logs["Pilot_ID"].dropna().unique()))
@@ -407,7 +335,7 @@ def render_admin() -> None:
         st.warning("No records matching the selected filters.")
         return
 
-    # 2. HIGH-LEVEL KPI ROW
+    # KPI summary
     st.markdown("### 📈 Cohort KPI Summary")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Learners Completed", len(filtered_df))
@@ -417,9 +345,8 @@ def render_admin() -> None:
 
     st.divider()
 
-    # 3. VISUAL MASTERY & NPS CHARTS
+    # Visual mastery & NPS charts
     v1, v2 = st.columns(2)
-
     with v1:
         st.markdown("#### 🎯 Pre vs. Post Score by Topic")
         topic_scores = filtered_df.groupby("Topic")[["Pre_Score", "Post_Score"]].mean().reset_index()
@@ -433,62 +360,57 @@ def render_admin() -> None:
 
     st.divider()
 
-    # 4. ITEM-LEVEL DISCRIMINATION ANALYSIS (Unpacking raw_responses JSON)
-    st.markdown("### 🧠 Question Discrimination & Distractor Breakdown")
-    
-    if "raw_responses" in filtered_df.columns or "Raw_Responses" in filtered_df.columns:
-        json_col = "raw_responses" if "raw_responses" in filtered_df.columns else "Raw_Responses"
-        valid_json_rows = filtered_df[filtered_df[json_col].notna()]
-
-        if not valid_json_rows.empty:
-            q_stats = []
-            for _, row in valid_json_rows.iterrows():
-                resp = row[json_col]
-                if isinstance(resp, dict):
-                    # Pre-Test Questions
-                    if "pre" in resp:
-                        for q_key, q_val in resp["pre"].items():
-                            q_stats.append({
-                                "Stage": "Pre-Test",
-                                "Question": q_val.get("question", q_key),
-                                "Correct": 1 if q_val.get("is_correct") else 0
-                            })
-                    # Post-Test Questions
-                    if "post" in resp:
-                        for q_key, q_val in resp["post"].items():
-                            q_stats.append({
-                                "Stage": "Pulse Check",
-                                "Question": q_val.get("question", q_key),
-                                "Correct": 1 if q_val.get("is_correct") else 0
-                            })
-
-            if q_stats:
-                df_q = pd.DataFrame(q_stats)
-                summary_q = df_q.groupby(["Stage", "Question"]).agg(
-                    Attempts=("Correct", "count"),
-                    Correct=("Correct", "sum"),
-                ).reset_index()
-                summary_q["Pass_Rate"] = (summary_q["Correct"] / summary_q["Attempts"] * 100).round(1).astype(str) + "%"
-                st.dataframe(summary_q, use_container_width=True)
-            else:
-                st.caption("JSON response structure empty or unpopulated for selected filters.")
-        else:
-            st.caption("No itemized raw responses found for these records yet.")
-    else:
-        st.caption("Item-level JSON tracking column not found in database logs.")
-
-    st.divider()
-
-    # 5. RAW DATA & EXPORT
+    # Telemetry export
     st.markdown("### 📋 Student Telemetry Records")
     st.dataframe(filtered_df.sort_values("Timestamp", ascending=False), use_container_width=True)
-    
     st.download_button(
         label=f"📥 Export Telemetry ({selected_cohort})",
         data=filtered_df.to_csv(index=False),
         file_name=f"vault_telemetry_{selected_cohort}_{datetime.now(NY_TZ).strftime('%Y%m%d')}.csv",
         mime="text/csv",
     )
+
+# ---------------------------------------------------------------------------
+# LEARNING PORTAL — STEP 1: PRE-TEST
+# ---------------------------------------------------------------------------
+
+def render_pre_test(row: pd.Series) -> None:
+    st.title(f"🔍 Pre-Assessment: {st.session_state.active_topic}")
+
+    if st.session_state.shuffled_pre is None:
+        st.session_state.shuffled_pre = build_shuffled_questions(row, "pre")
+
+    p_ans = {}
+    for idx, q in enumerate(st.session_state.shuffled_pre):
+        p_ans[q["id"]] = st.radio(
+            f"Question {idx + 1}: {q['text']}",
+            q["options"],
+            index=None,
+            key=f"p_{q['id']}",
+        )
+
+    st.divider()
+    c1, c2 = st.columns(2)
+    with c1:
+        class_code = st.text_input("Class Code", value=st.session_state.active_pilot_id)
+    with c2:
+        student_id = st.text_input("Your Initials")
+
+    if st.button("ENTER THE VAULT ⚡", use_container_width=True, type="primary"):
+        if not class_code or not student_id:
+            st.warning("Please enter your Class Code and Initials.")
+        elif p_ans.get("q1") is None or p_ans.get("q2") is None:
+            st.warning("Please answer both questions before proceeding.")
+        else:
+            st.session_state.update({
+                "class_code": class_code,
+                "student_id": student_id,
+                "ans_pre1":   p_ans["q1"],
+                "ans_pre2":   p_ans["q2"],
+                "start_time": datetime.now(NY_TZ),
+                "step":       "vault_content",
+            })
+            st.rerun()
 
 # ---------------------------------------------------------------------------
 # LEARNING PORTAL — STEP 2: VIDEO + PULSE CHECK
@@ -550,16 +472,48 @@ def _submit_results(row: pd.Series, pst_ans: dict) -> None:
     video_len = float(row.get("Video_Length_Sec", DEFAULT_VIDEO_LEN_SEC))
     status    = "Completed" if elapsed >= video_len * VIDEO_COMPLETE_RATIO else "Skimmed"
 
+    raw_responses = {
+        "pre": {
+            "q1": {
+                "question": str(row.get("Pre_Q1", "")),
+                "selected": st.session_state.ans_pre1,
+                "correct_answer": str(row.get("Pre_A1", "")).strip(),
+                "is_correct": st.session_state.ans_pre1 == str(row.get("Pre_A1", "")).strip(),
+            },
+            "q2": {
+                "question": str(row.get("Pre_Q2", "")),
+                "selected": st.session_state.ans_pre2,
+                "correct_answer": str(row.get("Pre_A2", "")).strip(),
+                "is_correct": st.session_state.ans_pre2 == str(row.get("Pre_A2", "")).strip(),
+            },
+        },
+        "post": {
+            "q1": {
+                "question": str(row.get("Post_Q1", "")),
+                "selected": pst_ans.get("q1"),
+                "correct_answer": str(row.get("Post_A1", "")).strip(),
+                "is_correct": pst_ans.get("q1") == str(row.get("Post_A1", "")).strip(),
+            },
+            "q2": {
+                "question": str(row.get("Post_Q2", "")),
+                "selected": pst_ans.get("q2"),
+                "correct_answer": str(row.get("Post_A2", "")).strip(),
+                "is_correct": pst_ans.get("q2") == str(row.get("Post_A2", "")).strip(),
+            },
+        },
+    }
+
     record = {
-        "Class":      st.session_state.class_code,
-        "Student":    st.session_state.student_id,
-        "Topic":      st.session_state.active_topic,
-        "Pre_Score":  s_pre,
-        "Post_Score": s_post,
-        "Lift":       lift,
-        "NPS":        st.session_state.nps_score,
-        "Duration":   int(elapsed),
-        "Status":     status,
+        "Class":          st.session_state.class_code,
+        "Student":        st.session_state.student_id,
+        "Topic":          st.session_state.active_topic,
+        "Pre_Score":      s_pre,
+        "Post_Score":     s_post,
+        "Lift":           lift,
+        "NPS":            st.session_state.nps_score,
+        "Duration":       int(elapsed),
+        "Status":         status,
+        "Raw_Responses":  raw_responses,
     }
 
     try:
@@ -622,7 +576,6 @@ def render_learning_portal(df_cms: pd.DataFrame) -> None:
 def main() -> None:
     client = get_supabase_client()
     
-    # Sidebar status & cohort selector
     st.sidebar.title("⚡ THE VAULT")
     if not client:
         st.sidebar.error("⚠️ Database: Disconnected")
