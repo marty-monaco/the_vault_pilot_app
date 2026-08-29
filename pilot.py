@@ -233,34 +233,34 @@ def _submit_results(row: pd.Series, pst_ans: dict) -> None:
     video_len = float(row.get("Video_Length_Sec", DEFAULT_VIDEO_LEN_SEC))
     status    = "Completed" if elapsed >= video_len * VIDEO_COMPLETE_RATIO else "Skimmed"
 
-    # Construct the JSON telemetry payload
+    # Build the JSON response object safely
     raw_responses = {
         "pre": {
             "q1": {
-                "question": str(row["Pre_Q1"]),
+                "question": str(row.get("Pre_Q1", "")),
                 "selected": st.session_state.ans_pre1,
-                "correct_answer": str(row["Pre_A1"]).strip(),
-                "is_correct": st.session_state.ans_pre1 == str(row["Pre_A1"]).strip(),
+                "correct_answer": str(row.get("Pre_A1", "")).strip(),
+                "is_correct": st.session_state.ans_pre1 == str(row.get("Pre_A1", "")).strip(),
             },
             "q2": {
-                "question": str(row["Pre_Q2"]),
+                "question": str(row.get("Pre_Q2", "")),
                 "selected": st.session_state.ans_pre2,
-                "correct_answer": str(row["Pre_A2"]).strip(),
-                "is_correct": st.session_state.ans_pre2 == str(row["Pre_A2"]).strip(),
+                "correct_answer": str(row.get("Pre_A2", "")).strip(),
+                "is_correct": st.session_state.ans_pre2 == str(row.get("Pre_A2", "")).strip(),
             },
         },
         "post": {
             "q1": {
-                "question": str(row["Post_Q1"]),
+                "question": str(row.get("Post_Q1", "")),
                 "selected": pst_ans.get("q1"),
-                "correct_answer": str(row["Post_A1"]).strip(),
-                "is_correct": pst_ans.get("q1") == str(row["Post_A1"]).strip(),
+                "correct_answer": str(row.get("Post_A1", "")).strip(),
+                "is_correct": pst_ans.get("q1") == str(row.get("Post_A1", "")).strip(),
             },
             "q2": {
-                "question": str(row["Post_Q2"]),
+                "question": str(row.get("Post_Q2", "")),
                 "selected": pst_ans.get("q2"),
-                "correct_answer": str(row["Post_A2"]).strip(),
-                "is_correct": pst_ans.get("q2") == str(row["Post_A2"]).strip(),
+                "correct_answer": str(row.get("Post_A2", "")).strip(),
+                "is_correct": pst_ans.get("q2") == str(row.get("Post_A2", "")).strip(),
             },
         },
     }
