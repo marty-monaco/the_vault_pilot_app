@@ -195,26 +195,100 @@ def load_logs() -> pd.DataFrame | None:
 
 
 def append_log(record: dict) -> None:
-    """Append one result row directly into Supabase with pilot_id tagging."""
+    """Append one result row directly into Supabase with itemized telemetry."""
     client = get_supabase_client()
     if not client:
         raise RuntimeError("Supabase client is not connected.")
 
     payload = {
-        "pilot_id":   str(st.session_state.active_pilot_id),
-        "class_code": str(record["Class"]),
-        "student_id": str(record["Student"]),
-        "topic":      str(record["Topic"]),
-        "pre_score":  int(record["Pre_Score"]),
-        "post_score": int(record["Post_Score"]),
-        "lift":       int(record["Lift"]),
-        "nps":        int(record["NPS"]),
-        "duration":   int(record["Duration"]),
-        "status":     str(record["Status"]),
+        "pilot_id":       str(st.session_state.active_pilot_id),
+        "class_code":     str(record["Class"]),
+        "student_id":     str(record["Student"]),
+        "topic":          str(record["Topic"]),
+        "pre_score":      int(record["Pre_Score"]),
+        "post_score":     int(record["Post_Score"]),
+        "lift":           int(record["Lift"]),
+        "nps":            int(record["NPS"]),
+        "duration":       int(record["Duration"]),
+        "status":         str(record["Status"]),
+        "raw_responses":  record["Raw_Responses"],  # Stores the JSON object
     }
     response = client.table("pilot_mastery_logs").insert(payload).execute()
     if not response.data:
         raise RuntimeError("Failed to insert record into Supabase.")
+
+def _submit_results(row: pd.Series, pst_ans: dict) -> None:
+    """Score, structure question-level JSON telemetry, and persist."""
+    now     = datetime.now(NY_TZ)
+    elapsed = (now - st.session_state.start_time).total_seconds()
+
+    pre_answers = {"q1": st.session_state.ans_pre1, "q2": st.session_state.ans_pre2}
+    s_pre  = score_answers(pre_answers, row, "pre")
+    s_post = score_answers(pst_ans, row, "post")
+    lift   = s_post - s_pre
+
+    video_len = float(row.get("Video_Length_Sec", DEFAULT_VIDEO_LEN_SEC))
+    status    = "Completed" if elapsed >= video_len * VIDEO_COMPLETE_RATIO else "Skimmed"
+
+    # Construct the JSON telemetry payload
+    raw_responses = {
+        "pre": {
+            "q1": {
+                "question": str(row["Pre_Q1"]),
+                "selected": st.session_state.ans_pre1,
+                "correct_answer": str(row["Pre_A1"]).strip(),
+                "is_correct": st.session_state.ans_pre1 == str(row["Pre_A1"]).strip(),
+            },
+            "q2": {
+                "question": str(row["Pre_Q2"]),
+                "selected": st.session_state.ans_pre2,
+                "correct_answer": str(row["Pre_A2"]).strip(),
+                "is_correct": st.session_state.ans_pre2 == str(row["Pre_A2"]).strip(),
+            },
+        },
+        "post": {
+            "q1": {
+                "question": str(row["Post_Q1"]),
+                "selected": pst_ans.get("q1"),
+                "correct_answer": str(row["Post_A1"]).strip(),
+                "is_correct": pst_ans.get("q1") == str(row["Post_A1"]).strip(),
+            },
+            "q2": {
+                "question": str(row["Post_Q2"]),
+                "selected": pst_ans.get("q2"),
+                "correct_answer": str(row["Post_A2"]).strip(),
+                "is_correct": pst_ans.get("q2") == str(row["Post_A2"]).strip(),
+            },
+        },
+    }
+
+    record = {
+        "Class":          st.session_state.class_code,
+        "Student":        st.session_state.student_id,
+        "Topic":          st.session_state.active_topic,
+        "Pre_Score":      s_pre,
+        "Post_Score":     s_post,
+        "Lift":           lift,
+        "NPS":            st.session_state.nps_score,
+        "Duration":       int(elapsed),
+        "Status":         status,
+        "Raw_Responses":  raw_responses,
+    }
+
+    try:
+        append_log(record)
+    except Exception as e:
+        st.error(f"❌ Failed to persist results to Supabase: {e}")
+        return
+
+    if status == "Completed":
+        st.balloons()
+        render_mastery_badge(st.session_state.student_id, lift)
+    else:
+        st.warning(
+            f"Mastery logged to cloud! (Lift: {lift:+d}) "
+            "Try watching the full video next time to earn a badge."
+        )
 
 # ---------------------------------------------------------------------------
 # HELPERS
