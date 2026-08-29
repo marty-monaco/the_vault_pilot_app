@@ -202,21 +202,24 @@ def append_log(record: dict) -> None:
 
     payload = {
         "pilot_id":       str(st.session_state.active_pilot_id),
-        "class_code":     str(record["Class"]),
-        "student_id":     str(record["Student"]),
-        "topic":          str(record["Topic"]),
-        "pre_score":      int(record["Pre_Score"]),
-        "post_score":     int(record["Post_Score"]),
-        "lift":           int(record["Lift"]),
-        "nps":            int(record["NPS"]),
-        "duration":       int(record["Duration"]),
-        "status":         str(record["Status"]),
-        "raw_responses":  record["Raw_Responses"],  # Stores the JSON object
+        "class_code":     str(record.get("Class", "")),
+        "student_id":     str(record.get("Student", "")),
+        "topic":          str(record.get("Topic", "")),
+        "pre_score":      int(record.get("Pre_Score", 0)),
+        "post_score":     int(record.get("Post_Score", 0)),
+        "lift":           int(record.get("Lift", 0)),
+        "nps":            int(record.get("NPS", 0)),
+        "duration":       int(record.get("Duration", 0)),
+        "status":         str(record.get("Status", "Completed")),
     }
+
+    # Include raw_responses JSON only if provided
+    if "Raw_Responses" in record and record["Raw_Responses"] is not None:
+        payload["raw_responses"] = record["Raw_Responses"]
+
     response = client.table("pilot_mastery_logs").insert(payload).execute()
     if not response.data:
         raise RuntimeError("Failed to insert record into Supabase.")
-
 def _submit_results(row: pd.Series, pst_ans: dict) -> None:
     """Score, structure question-level JSON telemetry, and persist."""
     now     = datetime.now(NY_TZ)
