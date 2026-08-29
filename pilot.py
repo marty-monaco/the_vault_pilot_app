@@ -152,20 +152,22 @@ def _normalize_cms_df(df: pd.DataFrame) -> pd.DataFrame:
 
 @st.cache_data(ttl=60)
 def load_cms() -> pd.DataFrame | None:
-    """Load CMS stories from Supabase with Google Sheets as fallback."""
+    """Load CMS stories directly from Supabase TheVault_CMS_Core."""
     client = get_supabase_client()
-
-    # Primary: Supabase
-    if client:
-        try:
-            response = client.table(CMS_TABLE_NAME).select("*").execute()
-            if response.data:
-                df = pd.DataFrame(response.data)
-                logger.info("CMS loaded from Supabase (%d rows).", len(df))
-                return _normalize_cms_df(df)
-            logger.warning("Supabase CMS table '%s' is empty.", CMS_TABLE_NAME)
-        except Exception as e:
-            logger.warning("Supabase CMS fetch failed: %s. Falling back to Google Sheets.", e)
+    if not client:
+        st.error("⚠️ Supabase client is not connected.")
+        return None
+    try:
+        response = client.table(CMS_TABLE_NAME).select("*").execute()
+        if response.data and len(response.data) > 0:
+            df = pd.DataFrame(response.data)
+            return _normalize_cms_df(df)
+        else:
+            st.error(f"⚠️ Query on '{CMS_TABLE_NAME}' succeeded, but returned 0 rows. Check if table has data and RLS SELECT policy is enabled.")
+            return None
+    except Exception as e:
+        st.error(f"⚠️ Supabase fetch error on '{CMS_TABLE_NAME}': {e}")
+        return None
 
     # Fallback: Google Sheets
     try:
