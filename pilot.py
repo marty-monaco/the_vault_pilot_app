@@ -368,11 +368,11 @@ def render_mastery_badge(initials: str, lift: int) -> None:
     )
 
 # ---------------------------------------------------------------------------
-# ADMIN PANEL (MULTI-PILOT COHORT ANALYTICS)
+# ADMIN PANEL (VISUAL TELEMETRY & ITEM DISCRIMINATION)
 # ---------------------------------------------------------------------------
 
 def render_admin() -> None:
-    st.title("🔐 Multi-Pilot Telemetry Dashboard")
+    st.title("📊 The Vault: Telemetry & Pilot Analytics")
     pw = st.text_input("Access Key", type="password")
 
     if not pw:
@@ -385,71 +385,110 @@ def render_admin() -> None:
     df_logs = load_logs()
 
     if df_logs is None or df_logs.empty:
-        st.info("No student telemetry found in Supabase yet.")
+        st.info("No student telemetry logged in Supabase yet.")
         return
 
-    # Pilot cohort filter
-    available_pilots = ["All Cohorts"] + sorted(list(df_logs["Pilot_ID"].dropna().unique()))
-    selected_cohort = st.selectbox("Filter Analytics by Pilot Cohort:", available_pilots)
-
+    # 1. COHORT FILTERING
+    cohort_col, topic_col = st.columns(2)
+    with cohort_col:
+        available_pilots = ["All Cohorts"] + sorted(list(df_logs["Pilot_ID"].dropna().unique()))
+        selected_cohort = st.selectbox("Filter by Pilot Cohort:", available_pilots)
+    
     filtered_df = df_logs if selected_cohort == "All Cohorts" else df_logs[df_logs["Pilot_ID"] == selected_cohort]
 
+    with topic_col:
+        available_topics = ["All Topics"] + sorted(list(filtered_df["Topic"].dropna().unique()))
+        selected_topic = st.selectbox("Filter by Topic:", available_topics)
+
+    if selected_topic != "All Topics":
+        filtered_df = filtered_df[filtered_df["Topic"] == selected_topic]
+
+    if filtered_df.empty:
+        st.warning("No records matching the selected filters.")
+        return
+
+    # 2. HIGH-LEVEL KPI ROW
+    st.markdown("### 📈 Cohort KPI Summary")
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Learners",     len(filtered_df))
-    c2.metric("Avg Lift",     f"+{filtered_df['Lift'].mean():.2f}")
+    c1.metric("Learners Completed", len(filtered_df))
+    c2.metric("Average Lift", f"+{filtered_df['Lift'].mean():.2f}")
     c3.metric("Avg Duration", f"{int(filtered_df['Duration'].mean())}s")
-    c4.metric("Avg NPS",      f"{filtered_df['NPS'].mean():.1f}")
+    c4.metric("Avg NPS Score", f"{filtered_df['NPS'].mean():.1f} / 10")
 
     st.divider()
+
+    # 3. VISUAL MASTERY & NPS CHARTS
+    v1, v2 = st.columns(2)
+
+    with v1:
+        st.markdown("#### 🎯 Pre vs. Post Score by Topic")
+        topic_scores = filtered_df.groupby("Topic")[["Pre_Score", "Post_Score"]].mean().reset_index()
+        st.bar_chart(topic_scores, x="Topic", y=["Pre_Score", "Post_Score"], stack=False)
+
+    with v2:
+        st.markdown("#### ⚡ NPS Rating Distribution")
+        nps_counts = filtered_df["NPS"].value_counts().reindex([2, 5, 8, 9, 10], fill_value=0).reset_index()
+        nps_counts.columns = ["Rating", "Count"]
+        st.bar_chart(nps_counts, x="Rating", y="Count")
+
+    st.divider()
+
+    # 4. ITEM-LEVEL DISCRIMINATION ANALYSIS (Unpacking raw_responses JSON)
+    st.markdown("### 🧠 Question Discrimination & Distractor Breakdown")
+    
+    if "raw_responses" in filtered_df.columns or "Raw_Responses" in filtered_df.columns:
+        json_col = "raw_responses" if "raw_responses" in filtered_df.columns else "Raw_Responses"
+        valid_json_rows = filtered_df[filtered_df[json_col].notna()]
+
+        if not valid_json_rows.empty:
+            q_stats = []
+            for _, row in valid_json_rows.iterrows():
+                resp = row[json_col]
+                if isinstance(resp, dict):
+                    # Pre-Test Questions
+                    if "pre" in resp:
+                        for q_key, q_val in resp["pre"].items():
+                            q_stats.append({
+                                "Stage": "Pre-Test",
+                                "Question": q_val.get("question", q_key),
+                                "Correct": 1 if q_val.get("is_correct") else 0
+                            })
+                    # Post-Test Questions
+                    if "post" in resp:
+                        for q_key, q_val in resp["post"].items():
+                            q_stats.append({
+                                "Stage": "Pulse Check",
+                                "Question": q_val.get("question", q_key),
+                                "Correct": 1 if q_val.get("is_correct") else 0
+                            })
+
+            if q_stats:
+                df_q = pd.DataFrame(q_stats)
+                summary_q = df_q.groupby(["Stage", "Question"]).agg(
+                    Attempts=("Correct", "count"),
+                    Correct=("Correct", "sum"),
+                ).reset_index()
+                summary_q["Pass_Rate"] = (summary_q["Correct"] / summary_q["Attempts"] * 100).round(1).astype(str) + "%"
+                st.dataframe(summary_q, use_container_width=True)
+            else:
+                st.caption("JSON response structure empty or unpopulated for selected filters.")
+        else:
+            st.caption("No itemized raw responses found for these records yet.")
+    else:
+        st.caption("Item-level JSON tracking column not found in database logs.")
+
+    st.divider()
+
+    # 5. RAW DATA & EXPORT
+    st.markdown("### 📋 Student Telemetry Records")
     st.dataframe(filtered_df.sort_values("Timestamp", ascending=False), use_container_width=True)
+    
     st.download_button(
-        label=f"📥 Download {selected_cohort} CSV",
+        label=f"📥 Export Telemetry ({selected_cohort})",
         data=filtered_df.to_csv(index=False),
         file_name=f"vault_telemetry_{selected_cohort}_{datetime.now(NY_TZ).strftime('%Y%m%d')}.csv",
         mime="text/csv",
     )
-
-# ---------------------------------------------------------------------------
-# LEARNING PORTAL — STEP 1: PRE-TEST
-# ---------------------------------------------------------------------------
-
-def render_pre_test(row: pd.Series) -> None:
-    st.title(f"🔍 Pre-Assessment: {st.session_state.active_topic}")
-
-    if st.session_state.shuffled_pre is None:
-        st.session_state.shuffled_pre = build_shuffled_questions(row, "pre")
-
-    p_ans = {}
-    for idx, q in enumerate(st.session_state.shuffled_pre):
-        p_ans[q["id"]] = st.radio(
-            f"Question {idx + 1}: {q['text']}",
-            q["options"],
-            index=None,
-            key=f"p_{q['id']}",
-        )
-
-    st.divider()
-    c1, c2 = st.columns(2)
-    with c1:
-        class_code = st.text_input("Class Code", value=st.session_state.active_pilot_id)
-    with c2:
-        student_id = st.text_input("Your Initials")
-
-    if st.button("ENTER THE VAULT ⚡", use_container_width=True, type="primary"):
-        if not class_code or not student_id:
-            st.warning("Please enter your Class Code and Initials.")
-        elif p_ans.get("q1") is None or p_ans.get("q2") is None:
-            st.warning("Please answer both questions before proceeding.")
-        else:
-            st.session_state.update({
-                "class_code": class_code,
-                "student_id": student_id,
-                "ans_pre1":   p_ans["q1"],
-                "ans_pre2":   p_ans["q2"],
-                "start_time": datetime.now(NY_TZ),
-                "step":       "vault_content",
-            })
-            st.rerun()
 
 # ---------------------------------------------------------------------------
 # LEARNING PORTAL — STEP 2: VIDEO + PULSE CHECK
