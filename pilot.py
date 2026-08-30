@@ -296,11 +296,145 @@ def render_mastery_badge(initials: str, lift: int) -> None:
     )
 
 # ---------------------------------------------------------------------------
-# ADMIN PANEL (MULTI-PILOT COHORT ANALYTICS)
+# ADMIN ANALYTICS HELPERS
+# ---------------------------------------------------------------------------
+
+def compute_cohort_benchmarks(df_logs: pd.DataFrame) -> pd.DataFrame:
+    """Generate side-by-side comparative KPI table across all cohorts."""
+    rows = []
+    for cohort, group in df_logs.groupby("Pilot_ID"):
+        total_students = len(group)
+        completed_count = len(group[group["Status"] == "Completed"])
+        completion_rate = (completed_count / total_students * 100) if total_students > 0 else 0.0
+        
+        rows.append({
+            "Cohort ID": str(cohort),
+            "Learners": total_students,
+            "Avg Pre-Score": round(group["Pre_Score"].mean(), 2),
+            "Avg Post-Score": round(group["Post_Score"].mean(), 2),
+            "Avg Lift": f"+{group['Lift'].mean():.2f}",
+            "Completion Rate": f"{completion_rate:.1f}%",
+            "Avg Duration (s)": int(group["Duration"].mean()),
+            "Avg NPS (/10)": round(group["NPS"].mean(), 1),
+        })
+    
+    # Add an All-Cohorts Aggregate Row
+    total_all = len(df_logs)
+    completed_all = len(df_logs[df_logs["Status"] == "Completed"])
+    comp_rate_all = (completed_all / total_all * 100) if total_all > 0 else 0.0
+    rows.append({
+        "Cohort ID": "🌟 ALL COHORTS (Aggregate)",
+        "Learners": total_all,
+        "Avg Pre-Score": round(df_logs["Pre_Score"].mean(), 2),
+        "Avg Post-Score": round(df_logs["Post_Score"].mean(), 2),
+        "Avg Lift": f"+{df_logs['Lift'].mean():.2f}",
+        "Completion Rate": f"{comp_rate_all:.1f}%",
+        "Avg Duration (s)": int(df_logs["Duration"].mean()),
+        "Avg NPS (/10)": round(df_logs["NPS"].mean(), 1),
+    })
+    return pd.DataFrame(rows)
+
+
+def compute_item_discrimination(filtered_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Unpacks raw_responses JSON and computes Item Discrimination Index (D)
+    and overall Difficulty (Pass Rate).
+    Formula: D = P_Upper(27%) - P_Lower(27%)
+    """
+    json_col = "raw_responses" if "raw_responses" in filtered_df.columns else "Raw_Responses"
+    if json_col not in filtered_df.columns:
+        return pd.DataFrame()
+
+    valid_records = filtered_df[filtered_df[json_col].notna()].copy()
+    if len(valid_records) < 3:
+        return pd.DataFrame()
+
+    # Sort students by total combined score (Pre + Post) to segment upper/lower groups
+    valid_records["total_score"] = valid_records["Pre_Score"] + valid_records["Post_Score"]
+    sorted_records = valid_records.sort_values("total_score", ascending=False)
+    
+    n_sample = len(sorted_records)
+    cutoff = max(1, int(round(n_sample * 0.27)))
+    upper_group = sorted_records.head(cutoff)
+    lower_group = sorted_records.tail(cutoff)
+
+    # Flatten question-level items
+    all_items = []
+    for _, row in sorted_records.iterrows():
+        resp = row[json_col]
+        stu_id = row.get("Student", "anon")
+        if not isinstance(resp, dict):
+            continue
+        
+        # Parse Pre-Assessment items
+        if "pre" in resp and isinstance(resp["pre"], dict):
+            for q_k, q_v in resp["pre"].items():
+                all_items.append({
+                    "student_id": stu_id,
+                    "stage": "Pre-Test",
+                    "question": q_v.get("question", q_k),
+                    "correct": 1 if q_v.get("is_correct") else 0,
+                    "is_upper": stu_id in upper_group["Student"].values,
+                    "is_lower": stu_id in lower_group["Student"].values,
+                })
+        # Parse Post-Assessment items
+        if "post" in resp and isinstance(resp["post"], dict):
+            for q_k, q_v in resp["post"].items():
+                all_items.append({
+                    "student_id": stu_id,
+                    "stage": "Pulse Check",
+                    "question": q_v.get("question", q_k),
+                    "correct": 1 if q_v.get("is_correct") else 0,
+                    "is_upper": stu_id in upper_group["Student"].values,
+                    "is_lower": stu_id in lower_group["Student"].values,
+                })
+
+    if not all_items:
+        return pd.DataFrame()
+
+    df_items = pd.DataFrame(all_items)
+    results = []
+
+    for (stage, question), grp in df_items.groupby(["stage", "question"]):
+        total_attempts = len(grp)
+        overall_pass_rate = grp["correct"].mean()
+
+        upper_sub = grp[grp["is_upper"]]
+        lower_sub = grp[grp["is_lower"]]
+
+        p_upper = upper_sub["correct"].mean() if not upper_sub.empty else 0.0
+        p_lower = lower_sub["correct"].mean() if not lower_sub.empty else 0.0
+        d_index = p_upper - p_lower
+
+        # Evaluate discrimination quality rating
+        if d_index >= 0.40:
+            status = "🟢 Excellent"
+        elif d_index >= 0.20:
+            status = "🟡 Acceptable"
+        elif d_index >= 0.0:
+            status = "🟠 Poor / Revise"
+        else:
+            status = "🔴 Flawed / Miskeyed"
+
+        results.append({
+            "Stage": stage,
+            "Question": question,
+            "Attempts": total_attempts,
+            "Difficulty (Pass Rate)": f"{overall_pass_rate * 100:.1f}%",
+            "Upper 27% Pass": f"{p_upper * 100:.1f}%",
+            "Lower 27% Pass": f"{p_lower * 100:.1f}%",
+            "Discrimination (D)": f"{d_index:+.2f}",
+            "Quality Rating": status,
+        })
+
+    return pd.DataFrame(results)
+
+# ---------------------------------------------------------------------------
+# ADMIN PANEL (EXPANDED BENCHMARKS & TELEMETRY)
 # ---------------------------------------------------------------------------
 
 def render_admin() -> None:
-    st.title("📊 The Vault: Telemetry & Pilot Analytics")
+    st.title("📊 The Vault: Multi-Pilot Analytics & Psychometrics")
     pw = st.text_input("Access Key", type="password")
 
     if not pw:
@@ -316,55 +450,87 @@ def render_admin() -> None:
         st.info("No student telemetry logged in Supabase yet.")
         return
 
-    # Cohort filtering
+    # -----------------------------------------------------------------------
+    # 1. CROSS-COHORT BENCHMARKING TABLE
+    # -----------------------------------------------------------------------
+    st.markdown("### 🏛️ Cross-Cohort Institutional Benchmarking")
+    st.caption("Side-by-side comparison across active pilots (e.g., Ivy Tech vs. High School vs. Standard).")
+    df_benchmarks = compute_cohort_benchmarks(df_logs)
+    st.dataframe(df_benchmarks, use_container_width=True, hide_index=True)
+
+    st.divider()
+
+    # -----------------------------------------------------------------------
+    # 2. COHORT & TOPIC DRILL-DOWN FILTERS
+    # -----------------------------------------------------------------------
+    st.markdown("### 🔍 Filter Cohort & Topic Data")
     cohort_col, topic_col = st.columns(2)
     with cohort_col:
         available_pilots = ["All Cohorts"] + sorted(list(df_logs["Pilot_ID"].dropna().unique()))
-        selected_cohort = st.selectbox("Filter by Pilot Cohort:", available_pilots)
+        selected_cohort = st.selectbox("Cohort Filter:", available_pilots)
     
     filtered_df = df_logs if selected_cohort == "All Cohorts" else df_logs[df_logs["Pilot_ID"] == selected_cohort]
 
     with topic_col:
         available_topics = ["All Topics"] + sorted(list(filtered_df["Topic"].dropna().unique()))
-        selected_topic = st.selectbox("Filter by Topic:", available_topics)
+        selected_topic = st.selectbox("Topic Filter:", available_topics)
 
     if selected_topic != "All Topics":
         filtered_df = filtered_df[filtered_df["Topic"] == selected_topic]
 
     if filtered_df.empty:
-        st.warning("No records matching the selected filters.")
+        st.warning("No records found matching the selected filters.")
         return
 
-    # KPI summary
-    st.markdown("### 📈 Cohort KPI Summary")
+    # -----------------------------------------------------------------------
+    # 3. HIGH-LEVEL KPI METRIC CARDS
+    # -----------------------------------------------------------------------
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Learners Completed", len(filtered_df))
+    c1.metric("Learners Analyzed", len(filtered_df))
     c2.metric("Average Lift", f"+{filtered_df['Lift'].mean():.2f}")
     c3.metric("Avg Duration", f"{int(filtered_df['Duration'].mean())}s")
     c4.metric("Avg NPS Score", f"{filtered_df['NPS'].mean():.1f} / 10")
 
     st.divider()
 
-    # Visual mastery & NPS charts
+    # -----------------------------------------------------------------------
+    # 4. VISUAL MASTERY & NPS CHARTS
+    # -----------------------------------------------------------------------
     v1, v2 = st.columns(2)
     with v1:
-        st.markdown("#### 🎯 Pre vs. Post Score by Topic")
+        st.markdown("#### 🎯 Pre vs. Post Mastery by Topic")
         topic_scores = filtered_df.groupby("Topic")[["Pre_Score", "Post_Score"]].mean().reset_index()
         st.bar_chart(topic_scores, x="Topic", y=["Pre_Score", "Post_Score"], stack=False)
 
     with v2:
-        st.markdown("#### ⚡ NPS Rating Distribution")
+        st.markdown("#### ⚡ NPS Sentiment Distribution")
         nps_counts = filtered_df["NPS"].value_counts().reindex([2, 5, 8, 9, 10], fill_value=0).reset_index()
         nps_counts.columns = ["Rating", "Count"]
         st.bar_chart(nps_counts, x="Rating", y="Count")
 
     st.divider()
 
-    # Telemetry export
-    st.markdown("### 📋 Student Telemetry Records")
+    # -----------------------------------------------------------------------
+    # 5. PSYCHOMETRIC ITEM DISCRIMINATION (D-INDEX)
+    # -----------------------------------------------------------------------
+    st.markdown("### 🧠 Item Discrimination ($D$) & Distractor Diagnostic")
+    st.caption("Evaluates how well questions separate top performers from struggling learners ($D = P_{Upper27\\%} - P_{Lower27\\%}$).")
+
+    df_discrim = compute_item_discrimination(filtered_df)
+    if not df_discrim.empty:
+        st.dataframe(df_discrim, use_container_width=True, hide_index=True)
+    else:
+        st.info("Item discrimination requires at least 3 completed sessions with question telemetry.")
+
+    st.divider()
+
+    # -----------------------------------------------------------------------
+    # 6. RAW TELEMETRY & EXPORT
+    # -----------------------------------------------------------------------
+    st.markdown("### 📋 Filtered Student Telemetry Log")
     st.dataframe(filtered_df.sort_values("Timestamp", ascending=False), use_container_width=True)
     st.download_button(
-        label=f"📥 Export Telemetry ({selected_cohort})",
+        label=f"📥 Export Telemetry CSV ({selected_cohort})",
         data=filtered_df.to_csv(index=False),
         file_name=f"vault_telemetry_{selected_cohort}_{datetime.now(NY_TZ).strftime('%Y%m%d')}.csv",
         mime="text/csv",
