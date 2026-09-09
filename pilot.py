@@ -24,7 +24,7 @@ CMS_TABLE_NAME         = "TheVault_CMS_Core"
 ADMIN_PASSWORD         = "vault2026"
 VIDEO_COMPLETE_RATIO   = 0.9     # 90% of video length = "Completed"
 DEFAULT_VIDEO_LEN_SEC  = 85
-DEFAULT_PILOT_ID       = "CRIM171"
+DEFAULT_PILOT_ID       = "WIRAPIDS_12"
 NY_TZ                  = pytz.timezone("US/Eastern")
 
 NPS_RATINGS = [
