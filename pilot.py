@@ -60,19 +60,20 @@ st.markdown("""
 # SESSION STATE & COHORT ROUTING
 # ---------------------------------------------------------------------------
 SESSION_DEFAULTS = {
-    "step":            "pre_test",
-    "active_topic":    None,
-    "start_time":      None,
-    "nps_score":       None,
-    "ans_pre1":        None,
-    "ans_pre2":        None,
-    "class_code":      "",
-    "student_id":      "",
-    "shuffled_pre":    None,
-    "shuffled_post":   None,
-    "active_pilot_id": DEFAULT_PILOT_ID,
-    "is_submitting":   False,
-    "submission_done": False,
+    "step":             "pre_test",
+    "active_topic":     None,
+    "start_time":       None,
+    "nps_score":        None,
+    "ans_pre1":         None,
+    "ans_pre2":         None,
+    "class_code":       "",
+    "student_id":       "",
+    "shuffled_pre":     None,
+    "shuffled_post":    None,
+    "active_pilot_id":  DEFAULT_PILOT_ID,
+    "is_submitting":    False,
+    "submission_done":  False,
+    "completed_result": None,
 }
 for k, v in SESSION_DEFAULTS.items():
     st.session_state.setdefault(k, v)
@@ -227,7 +228,7 @@ def append_log(record: dict) -> None:
     except Exception as e:
         err_msg = str(e)
         if "23505" in err_msg or "unique_student_topic_per_pilot" in err_msg:
-            logger.info("Duplicate submission detected and handled idempotently.")
+            logger.info("Duplicate submission caught gracefully.")
             return
         raise e
 
@@ -559,23 +560,47 @@ def render_pre_test(row: pd.Series) -> None:
             st.warning("Please answer both questions before proceeding.")
         else:
             st.session_state.update({
-                "class_code": class_code,
-                "student_id": student_id,
-                "ans_pre1":   p_ans["q1"],
-                "ans_pre2":   p_ans["q2"],
-                "start_time": datetime.now(NY_TZ),
-                "step":       "vault_content",
-                "is_submitting": False,
-                "submission_done": False,
+                "class_code":       class_code,
+                "student_id":       student_id,
+                "ans_pre1":         p_ans["q1"],
+                "ans_pre2":         p_ans["q2"],
+                "start_time":       datetime.now(NY_TZ),
+                "step":             "vault_content",
+                "is_submitting":    False,
+                "submission_done":  False,
+                "completed_result": None,
             })
             st.rerun()
 
 
 # ---------------------------------------------------------------------------
-# LEARNING PORTAL — STEP 2: VIDEO + PULSE CHECK
+# LEARNING PORTAL — STEP 2: VIDEO + PULSE CHECK & CELEBRATION
 # ---------------------------------------------------------------------------
 
 def render_vault_content(row: pd.Series) -> None:
+    # --- DEDICATED MASTERY COMPLETION SCREEN ---
+    if st.session_state.get("submission_done") and st.session_state.get("completed_result"):
+        res = st.session_state.completed_result
+        if res.get("status") == "Completed":
+            st.balloons()
+            render_mastery_badge(res.get("student_id", ""), res.get("lift", 0))
+        else:
+            st.warning(
+                f"Mastery logged to cloud! (Lift: {res.get('lift', 0):+d}) "
+                "Try watching the full video next time to earn a badge."
+            )
+
+        st.write("")
+        if st.button("⬅️ Back to Stories", use_container_width=True):
+            st.session_state.active_topic = None
+            st.session_state.step = "pre_test"
+            st.session_state.submission_done = False
+            st.session_state.is_submitting = False
+            st.session_state.completed_result = None
+            st.rerun()
+        return
+
+    # --- NORMAL PRESENTATION FLOW ---
     st.title(f"🎬 {st.session_state.active_topic}")
 
     video_url = resolve_video_url(str(row.get("Video_URL", "")))
@@ -622,7 +647,7 @@ def render_vault_content(row: pd.Series) -> None:
 
 
 def _submit_results(row: pd.Series, pst_ans: dict) -> None:
-    """Score, persist to Supabase, and render results."""
+    """Score, persist to Supabase, and trigger completion celebration."""
     now     = datetime.now(NY_TZ)
     elapsed = (now - st.session_state.start_time).total_seconds()
 
@@ -685,22 +710,12 @@ def _submit_results(row: pd.Series, pst_ans: dict) -> None:
         st.session_state.completed_result = {
             "status": status,
             "student_id": st.session_state.student_id,
-            "lift": lift
+            "lift": lift,
         }
         st.rerun()
     except Exception as e:
         st.session_state.is_submitting = False
         st.error(f"❌ Failed to persist results to Supabase: {e}")
-        return
-
-    if status == "Completed":
-        st.balloons()
-        render_mastery_badge(st.session_state.student_id, lift)
-    else:
-        st.warning(
-            f"Mastery logged to cloud! (Lift: {lift:+d}) "
-            "Try watching the full video next time to earn a badge."
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -765,6 +780,8 @@ def main() -> None:
         st.session_state.active_pilot_id = new_pilot
         st.session_state.active_topic = None
         st.session_state.step = "pre_test"
+        st.session_state.submission_done = False
+        st.session_state.completed_result = None
         st.rerun()
 
     nav = st.sidebar.radio("Navigation", ["Learning Portal", "Pilot Summary (Admin)"])
