@@ -217,7 +217,11 @@ def append_log(record: dict) -> None:
     if "Raw_Responses" in record and record["Raw_Responses"] is not None:
         payload["raw_responses"] = record["Raw_Responses"]
 
-    response = client.table("pilot_mastery_logs").insert(payload).execute()
+    response = (
+    supabase.table("pilot_mastery_logs")
+    .upsert(payload, on_conflict="pilot_id,student_id,topic")
+    .execute()
+)
     if not response.data:
         raise RuntimeError("Failed to insert record into Supabase.")
 
