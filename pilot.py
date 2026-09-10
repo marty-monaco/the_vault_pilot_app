@@ -71,6 +71,8 @@ SESSION_DEFAULTS = {
     "shuffled_pre":    None,
     "shuffled_post":   None,
     "active_pilot_id": DEFAULT_PILOT_ID,
+    "is_submitting":   False,
+    "submission_done": False,
 }
 for k, v in SESSION_DEFAULTS.items():
     st.session_state.setdefault(k, v)
@@ -196,7 +198,7 @@ def load_logs() -> pd.DataFrame | None:
 
 
 def append_log(record: dict) -> None:
-    """Append one result row directly into Supabase with itemized telemetry."""
+    """Append or upsert one result row directly into Supabase with itemized telemetry."""
     client = get_supabase_client()
     if not client:
         raise RuntimeError("Supabase client is not connected.")
@@ -204,7 +206,7 @@ def append_log(record: dict) -> None:
     payload = {
         "pilot_id":       str(st.session_state.active_pilot_id),
         "class_code":     str(record.get("Class", "")),
-        "student_id":     str(record.get("Student", "")),
+        "student_id":     str(record.get("Student", "")).strip().upper(),
         "topic":          str(record.get("Topic", "")),
         "pre_score":      int(record.get("Pre_Score", 0)),
         "post_score":     int(record.get("Post_Score", 0)),
@@ -217,13 +219,18 @@ def append_log(record: dict) -> None:
     if "Raw_Responses" in record and record["Raw_Responses"] is not None:
         payload["raw_responses"] = record["Raw_Responses"]
 
-    response = (
-    supabase.table("pilot_mastery_logs")
-    .upsert(payload, on_conflict="pilot_id,student_id,topic")
-    .execute()
-)
-    if not response.data:
-        raise RuntimeError("Failed to insert record into Supabase.")
+    try:
+        client.table("pilot_mastery_logs").upsert(
+            payload,
+            on_conflict="pilot_id,student_id,topic"
+        ).execute()
+    except Exception as e:
+        err_msg = str(e)
+        if "23505" in err_msg or "unique_student_topic_per_pilot" in err_msg:
+            logger.info("Duplicate submission detected and handled idempotently.")
+            return
+        raise e
+
 
 # ---------------------------------------------------------------------------
 # HELPERS
@@ -299,6 +306,7 @@ def render_mastery_badge(initials: str, lift: int) -> None:
         unsafe_allow_html=True,
     )
 
+
 # ---------------------------------------------------------------------------
 # ADMIN ANALYTICS HELPERS
 # ---------------------------------------------------------------------------
@@ -310,7 +318,7 @@ def compute_cohort_benchmarks(df_logs: pd.DataFrame) -> pd.DataFrame:
         total_students = len(group)
         completed_count = len(group[group["Status"] == "Completed"])
         completion_rate = (completed_count / total_students * 100) if total_students > 0 else 0.0
-        
+
         rows.append({
             "Cohort ID": str(cohort),
             "Learners": total_students,
@@ -321,8 +329,7 @@ def compute_cohort_benchmarks(df_logs: pd.DataFrame) -> pd.DataFrame:
             "Avg Duration (s)": int(group["Duration"].mean()),
             "Avg NPS (/10)": round(group["NPS"].mean(), 1),
         })
-    
-    # Add an All-Cohorts Aggregate Row
+
     total_all = len(df_logs)
     completed_all = len(df_logs[df_logs["Status"] == "Completed"])
     comp_rate_all = (completed_all / total_all * 100) if total_all > 0 else 0.0
@@ -353,24 +360,21 @@ def compute_item_discrimination(filtered_df: pd.DataFrame) -> pd.DataFrame:
     if len(valid_records) < 3:
         return pd.DataFrame()
 
-    # Sort students by total combined score (Pre + Post) to segment upper/lower groups
     valid_records["total_score"] = valid_records["Pre_Score"] + valid_records["Post_Score"]
     sorted_records = valid_records.sort_values("total_score", ascending=False)
-    
+
     n_sample = len(sorted_records)
     cutoff = max(1, int(round(n_sample * 0.27)))
     upper_group = sorted_records.head(cutoff)
     lower_group = sorted_records.tail(cutoff)
 
-    # Flatten question-level items
     all_items = []
     for _, row in sorted_records.iterrows():
         resp = row[json_col]
         stu_id = row.get("Student", "anon")
         if not isinstance(resp, dict):
             continue
-        
-        # Parse Pre-Assessment items
+
         if "pre" in resp and isinstance(resp["pre"], dict):
             for q_k, q_v in resp["pre"].items():
                 all_items.append({
@@ -381,7 +385,6 @@ def compute_item_discrimination(filtered_df: pd.DataFrame) -> pd.DataFrame:
                     "is_upper": stu_id in upper_group["Student"].values,
                     "is_lower": stu_id in lower_group["Student"].values,
                 })
-        # Parse Post-Assessment items
         if "post" in resp and isinstance(resp["post"], dict):
             for q_k, q_v in resp["post"].items():
                 all_items.append({
@@ -410,7 +413,6 @@ def compute_item_discrimination(filtered_df: pd.DataFrame) -> pd.DataFrame:
         p_lower = lower_sub["correct"].mean() if not lower_sub.empty else 0.0
         d_index = p_upper - p_lower
 
-        # Evaluate discrimination quality rating
         if d_index >= 0.40:
             status = "🟢 Excellent"
         elif d_index >= 0.20:
@@ -433,8 +435,9 @@ def compute_item_discrimination(filtered_df: pd.DataFrame) -> pd.DataFrame:
 
     return pd.DataFrame(results)
 
+
 # ---------------------------------------------------------------------------
-# ADMIN PANEL (EXPANDED BENCHMARKS & TELEMETRY)
+# ADMIN PANEL
 # ---------------------------------------------------------------------------
 
 def render_admin() -> None:
@@ -454,25 +457,19 @@ def render_admin() -> None:
         st.info("No student telemetry logged in Supabase yet.")
         return
 
-    # -----------------------------------------------------------------------
-    # 1. CROSS-COHORT BENCHMARKING TABLE
-    # -----------------------------------------------------------------------
     st.markdown("### 🏛️ Cross-Cohort Institutional Benchmarking")
-    st.caption("Side-by-side comparison across active pilots (e.g., Ivy Tech vs. High School vs. Standard).")
+    st.caption("Side-by-side comparison across active pilots.")
     df_benchmarks = compute_cohort_benchmarks(df_logs)
     st.dataframe(df_benchmarks, use_container_width=True, hide_index=True)
 
     st.divider()
 
-    # -----------------------------------------------------------------------
-    # 2. COHORT & TOPIC DRILL-DOWN FILTERS
-    # -----------------------------------------------------------------------
     st.markdown("### 🔍 Filter Cohort & Topic Data")
     cohort_col, topic_col = st.columns(2)
     with cohort_col:
         available_pilots = ["All Cohorts"] + sorted(list(df_logs["Pilot_ID"].dropna().unique()))
         selected_cohort = st.selectbox("Cohort Filter:", available_pilots)
-    
+
     filtered_df = df_logs if selected_cohort == "All Cohorts" else df_logs[df_logs["Pilot_ID"] == selected_cohort]
 
     with topic_col:
@@ -486,9 +483,6 @@ def render_admin() -> None:
         st.warning("No records found matching the selected filters.")
         return
 
-    # -----------------------------------------------------------------------
-    # 3. HIGH-LEVEL KPI METRIC CARDS
-    # -----------------------------------------------------------------------
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Learners Analyzed", len(filtered_df))
     c2.metric("Average Lift", f"+{filtered_df['Lift'].mean():.2f}")
@@ -497,9 +491,6 @@ def render_admin() -> None:
 
     st.divider()
 
-    # -----------------------------------------------------------------------
-    # 4. VISUAL MASTERY & NPS CHARTS
-    # -----------------------------------------------------------------------
     v1, v2 = st.columns(2)
     with v1:
         st.markdown("#### 🎯 Pre vs. Post Mastery by Topic")
@@ -514,11 +505,8 @@ def render_admin() -> None:
 
     st.divider()
 
-    # -----------------------------------------------------------------------
-    # 5. PSYCHOMETRIC ITEM DISCRIMINATION (D-INDEX)
-    # -----------------------------------------------------------------------
     st.markdown("### 🧠 Item Discrimination ($D$) & Distractor Diagnostic")
-    st.caption("Evaluates how well questions separate top performers from struggling learners ($D = P_{Upper27\\%} - P_{Lower27\\%}$).")
+    st.caption("Evaluates how well questions separate top performers from struggling learners.")
 
     df_discrim = compute_item_discrimination(filtered_df)
     if not df_discrim.empty:
@@ -528,9 +516,6 @@ def render_admin() -> None:
 
     st.divider()
 
-    # -----------------------------------------------------------------------
-    # 6. RAW TELEMETRY & EXPORT
-    # -----------------------------------------------------------------------
     st.markdown("### 📋 Filtered Student Telemetry Log")
     st.dataframe(filtered_df.sort_values("Timestamp", ascending=False), use_container_width=True)
     st.download_button(
@@ -539,6 +524,7 @@ def render_admin() -> None:
         file_name=f"vault_telemetry_{selected_cohort}_{datetime.now(NY_TZ).strftime('%Y%m%d')}.csv",
         mime="text/csv",
     )
+
 
 # ---------------------------------------------------------------------------
 # LEARNING PORTAL — STEP 1: PRE-TEST
@@ -579,8 +565,11 @@ def render_pre_test(row: pd.Series) -> None:
                 "ans_pre2":   p_ans["q2"],
                 "start_time": datetime.now(NY_TZ),
                 "step":       "vault_content",
+                "is_submitting": False,
+                "submission_done": False,
             })
             st.rerun()
+
 
 # ---------------------------------------------------------------------------
 # LEARNING PORTAL — STEP 2: VIDEO + PULSE CHECK
@@ -620,12 +609,15 @@ def render_vault_content(row: pd.Series) -> None:
     if st.session_state.nps_score is not None:
         st.success(f"Selected Rating: {st.session_state.nps_score}/10")
 
-    if st.button("LOG MASTERY & FINISH 🚀", use_container_width=True, type="primary"):
+    submit_disabled = st.session_state.get("is_submitting", False) or st.session_state.get("submission_done", False)
+
+    if st.button("LOG MASTERY & FINISH 🚀", use_container_width=True, type="primary", disabled=submit_disabled):
         if pst_ans.get("q1") is None or pst_ans.get("q2") is None:
             st.error("Please answer both Pulse Check questions.")
         elif st.session_state.nps_score is None:
             st.error("Please select a rating before finishing.")
         else:
+            st.session_state.is_submitting = True
             _submit_results(row, pst_ans)
 
 
@@ -688,7 +680,9 @@ def _submit_results(row: pd.Series, pst_ans: dict) -> None:
 
     try:
         append_log(record)
+        st.session_state.submission_done = True
     except Exception as e:
+        st.session_state.is_submitting = False
         st.error(f"❌ Failed to persist results to Supabase: {e}")
         return
 
@@ -700,6 +694,7 @@ def _submit_results(row: pd.Series, pst_ans: dict) -> None:
             f"Mastery logged to cloud! (Lift: {lift:+d}) "
             "Try watching the full video next time to earn a badge."
         )
+
 
 # ---------------------------------------------------------------------------
 # LEARNING PORTAL — TOPIC SELECTOR
@@ -739,13 +734,14 @@ def render_learning_portal(df_cms: pd.DataFrame) -> None:
     elif st.session_state.step == "vault_content":
         render_vault_content(row)
 
+
 # ---------------------------------------------------------------------------
 # MAIN
 # ---------------------------------------------------------------------------
 
 def main() -> None:
     client = get_supabase_client()
-    
+
     st.sidebar.title("⚡ THE VAULT")
     if not client:
         st.sidebar.error("⚠️ Database: Disconnected")
@@ -754,7 +750,7 @@ def main() -> None:
 
     # Cohort switcher in sidebar
     new_pilot = st.sidebar.text_input(
-        "Cohort ID:", 
+        "Cohort ID:",
         value=st.session_state.active_pilot_id,
         help="Change this to view topics from other pilots (e.g. CRIM171, ECON101)."
     )
