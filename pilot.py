@@ -681,6 +681,13 @@ def _submit_results(row: pd.Series, pst_ans: dict) -> None:
     try:
         append_log(record)
         st.session_state.submission_done = True
+        st.session_state.is_submitting = False
+        st.session_state.completed_result = {
+            "status": status,
+            "student_id": st.session_state.student_id,
+            "lift": lift
+        }
+        st.rerun()
     except Exception as e:
         st.session_state.is_submitting = False
         st.error(f"❌ Failed to persist results to Supabase: {e}")
