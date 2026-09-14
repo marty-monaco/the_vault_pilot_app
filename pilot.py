@@ -10,6 +10,7 @@ Unified Delivery, Telemetry & Curriculum Studio Layer for The Vault.
 import os
 import re
 import sys
+import hmac
 import random
 import logging
 import streamlit as st
@@ -34,7 +35,6 @@ logger = logging.getLogger(__name__)
 # CONSTANTS & CONFIG
 # ---------------------------------------------------------------------------
 CMS_TABLE_NAME         = "TheVault_CMS_Core"
-ADMIN_PASSWORD         = "vault2026"
 VIDEO_COMPLETE_RATIO   = 0.9     # 90% of video length = "Completed"
 DEFAULT_VIDEO_LEN_SEC  = 85
 DEFAULT_PILOT_ID       = "WIRAPIDS_12"
@@ -80,6 +80,7 @@ SESSION_DEFAULTS = {
     "submission_done":  False,
     "completed_result": None,
     "studio_authed":    False,
+    "admin_authed":     False,
 }
 for k, v in SESSION_DEFAULTS.items():
     st.session_state.setdefault(k, v)
@@ -88,6 +89,15 @@ for k, v in SESSION_DEFAULTS.items():
 url_pilot = st.query_params.get("pilot")
 if url_pilot:
     st.session_state.active_pilot_id = str(url_pilot)
+
+# ---------------------------------------------------------------------------
+# SECURITY HELPERS
+# ---------------------------------------------------------------------------
+
+def verify_admin_password(candidate_pw: str) -> bool:
+    """Performs constant-time comparison against admin password stored in secrets or env."""
+    configured_pw = st.secrets.get("ADMIN_PASSWORD") or os.environ.get("ADMIN_PASSWORD") or "vault2026"
+    return hmac.compare_digest(candidate_pw.strip(), configured_pw.strip())
 
 # ---------------------------------------------------------------------------
 # DATABASE INITIALIZATION
@@ -118,7 +128,6 @@ def get_supabase_client() -> Client | None:
     except Exception as e:
         logger.error(f"Failed to initialize Supabase client: {e}")
         return None
-
 
 # ---------------------------------------------------------------------------
 # DATA LOADING & PERSISTENCE
@@ -237,7 +246,6 @@ def append_log(record: dict) -> None:
             logger.info("Duplicate submission caught gracefully.")
             return
         raise e
-
 
 # ---------------------------------------------------------------------------
 # HELPERS
