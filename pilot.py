@@ -588,8 +588,8 @@ def render_curriculum_studio() -> None:
 
     with c2:
         st.subheader("2. Guardrails In Effect")
-        st.markdown("""
-        * **Anti-Ceiling Pre-Assessment:** Banned from testing dictionary definitions. Probes naive intuition to target a **40%–60% baseline**.
+        st.markdown(r"""
+        * **Anti-Ceiling Pre-Assessment:** Banned from testing dictionary definitions. Probes naive intuition to target a **40%-60% baseline**.
         * **Domain-Locked Post-Assessment:** Strictly anchored to the story narrative. Avoids domain jumps (e.g. no testing rent control after a water video).
         * **Auto-Schema Validation:** Automatically formats options to `_Q2` database columns, preventing Postgres 42601 errors.
         """)
