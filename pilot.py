@@ -297,8 +297,6 @@ def build_shuffled_questions(row: pd.Series, stage: str) -> list[dict]:
         ]
     random.shuffle(pool)
     return pool
-
-
 def score_answers(answers: dict, row: pd.Series, stage: str) -> int:
     """Calculate correct answers count."""
     if stage == "pre":
@@ -309,20 +307,12 @@ def score_answers(answers: dict, row: pd.Series, stage: str) -> int:
     return (
         (1 if str(answers.get("q1", "")).strip() == str(row.get("Post_A1", "")).strip() else 0)
         + (1 if str(answers.get("q2", "")).strip() == str(row.get("Post_A2", "")).strip() else 0)
-    def render_mastery_badge(initials: str, lift: int) -> None:
+    )
+
+
+def render_mastery_badge(initials: str, lift: int) -> None:
     st.markdown(
         f'
-        {initials.upper()}
-
-'
-f'CERTIFIED MASTER
-
-
-LIFT: {lift:+d}'
-f'
-
-',
-unsafe_allow_html=True,
 )
 
 Part 2: Paste immediately beneath render_mastery_badge to the end of the file
