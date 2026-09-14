@@ -311,8 +311,7 @@ def score_answers(answers: dict, row: pd.Series, stage: str) -> int:
 
 
 def render_mastery_badge(initials: str, lift: int) -> None:
-    st.markdown(
-        f'
+    badge_html = f"""
 )
 
 Part 2: Paste immediately beneath render_mastery_badge to the end of the file
