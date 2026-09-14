@@ -309,10 +309,7 @@ def score_answers(answers: dict, row: pd.Series, stage: str) -> int:
     return (
         (1 if str(answers.get("q1", "")).strip() == str(row.get("Post_A1", "")).strip() else 0)
         + (1 if str(answers.get("q2", "")).strip() == str(row.get("Post_A2", "")).strip() else 0)
-    )
-
-
-def render_mastery_badge(initials: str, lift: int) -> None:
+    def render_mastery_badge(initials: str, lift: int) -> None:
     st.markdown(
         f'
         {initials.upper()}
@@ -333,11 +330,6 @@ Python
 # ---------------------------------------------------------------------------
 # ADMIN ANALYTICS HELPERS
 # ---------------------------------------------------------------------------
-
-def compute_cohort_benchmarks(df_logs: pd.DataFrame) -> pd.DataFrame:
-    """Generate side-by-side comparative KPI table across all cohorts."""
-    rows = []
-    for cohort, group in df_logs.groupby("Pilot_ID"):
         total_students = len(group)
         completed_count = len(group[group["Status"] == "Completed"])
         completion_rate = (completed_count / total_students * 100) if total_students > 0 else 0.0
